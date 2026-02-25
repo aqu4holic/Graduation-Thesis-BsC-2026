@@ -1,0 +1,35 @@
+# extracted from a notebook
+
+## third-party
+causal-learn  # alias of causallearn
+crunch-cli  # alias of crunch
+dcor
+econml
+joblib
+lightgbm
+networkx
+numpy
+pandas
+pingouin
+scikit-learn  # alias of sklearn
+scipy
+semopy
+statsmodels
+tqdm
+xgboost
+
+## standard
+#collections
+#datetime
+#functools
+#json
+#math
+#multiprocessing
+#os
+#pickle
+#pprint
+#random
+#re
+#sys
+#typing
+#warnings

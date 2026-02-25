@@ -1,5 +1,5 @@
 # Python-generated files
-__pycache__/
+*__pycache__/
 *.py[oc]
 build/
 dist/
@@ -11,4 +11,7 @@ wheels/
 .crunchdao
 
 # data files
-data/
+*data/
+*lightning_logs/
+*prediction/
+*resources/
