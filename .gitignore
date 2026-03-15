@@ -15,3 +15,4 @@ wheels/
 *lightning_logs/
 *prediction/
 *resources/
+*cache*/
