@@ -1,15 +1,10 @@
-# extracted from a notebook
+# frozen from registry
 
-## third-party
-crunch-cli  # alias of crunch
+crunch-cli
 networkx
 numpy
 pandas
-pytorch-lightning  # alias of pytorch_lightning
-scikit-learn  # alias of sklearn
-torch
+pytorch-lightning
+scikit-learn==1.8.0
+torch==2.10.0
 tqdm
-
-## standard
-#os
-#typing

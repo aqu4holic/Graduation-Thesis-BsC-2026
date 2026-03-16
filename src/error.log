@@ -1,60 +1,9 @@
-Input Notebook:  v2_fast.ipynb
-Output Notebook: v2_fast_output.ipynb
-Executing:   0%|          | 0/29 [00:00<?, ?cell/s]Executing notebook with kernel: python3
-Executing:   3%|▎         | 1/29 [00:01<00:42,  1.53s/cell]Executing:  10%|█         | 3/29 [00:04<00:34,  1.32s/cell]Executing:  14%|█▍        | 4/29 [00:04<00:29,  1.19s/cell]Executing:  21%|██        | 6/29 [00:23<01:59,  5.19s/cell]Executing:  38%|███▊      | 11/29 [00:23<00:33,  1.88s/cell]Executing:  48%|████▊     | 14/29 [00:23<00:18,  1.24s/cell]Executing:  62%|██████▏   | 18/29 [00:23<00:08,  1.33cell/s]Executing:  76%|███████▌  | 22/29 [00:23<00:03,  2.05cell/s]Executing:  86%|████████▌ | 25/29 [00:24<00:01,  2.76cell/s]Executing:  97%|█████████▋| 28/29 [00:24<00:00,  3.72cell/s]Executing:  97%|█████████▋| 28/29 [00:40<00:00,  3.72cell/s]Executing: 100%|██████████| 29/29 [3:56:16<00:00, 1699.98s/cell]Executing: 100%|██████████| 29/29 [3:56:24<00:00, 489.13s/cell] 
-Traceback (most recent call last):
-  File "/drive1/phatnt/Graduation-Thesis-BsC-2026/.venv/bin/papermill", line 10, in <module>
-    sys.exit(papermill())
-             ^^^^^^^^^^^
-  File "/drive1/phatnt/Graduation-Thesis-BsC-2026/.venv/lib/python3.12/site-packages/click/core.py", line 1485, in __call__
-    return self.main(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/drive1/phatnt/Graduation-Thesis-BsC-2026/.venv/lib/python3.12/site-packages/click/core.py", line 1406, in main
-    rv = self.invoke(ctx)
-         ^^^^^^^^^^^^^^^^
-  File "/drive1/phatnt/Graduation-Thesis-BsC-2026/.venv/lib/python3.12/site-packages/click/core.py", line 1269, in invoke
-    return ctx.invoke(self.callback, **ctx.params)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/drive1/phatnt/Graduation-Thesis-BsC-2026/.venv/lib/python3.12/site-packages/click/core.py", line 824, in invoke
-    return callback(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/drive1/phatnt/Graduation-Thesis-BsC-2026/.venv/lib/python3.12/site-packages/click/decorators.py", line 34, in new_func
-    return f(get_current_context(), *args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/drive1/phatnt/Graduation-Thesis-BsC-2026/.venv/lib/python3.12/site-packages/papermill/cli.py", line 235, in papermill
-    execute_notebook(
-  File "/drive1/phatnt/Graduation-Thesis-BsC-2026/.venv/lib/python3.12/site-packages/papermill/execute.py", line 116, in execute_notebook
-    nb = papermill_engines.execute_notebook_with_engine(
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/drive1/phatnt/Graduation-Thesis-BsC-2026/.venv/lib/python3.12/site-packages/papermill/engines.py", line 49, in execute_notebook_with_engine
-    return self.get_engine(engine_name).execute_notebook(nb, kernel_name, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/drive1/phatnt/Graduation-Thesis-BsC-2026/.venv/lib/python3.12/site-packages/papermill/engines.py", line 371, in execute_notebook
-    cls.execute_managed_notebook(nb_man, kernel_name, log_output=log_output, **kwargs)
-  File "/drive1/phatnt/Graduation-Thesis-BsC-2026/.venv/lib/python3.12/site-packages/papermill/engines.py", line 443, in execute_managed_notebook
-    return PapermillNotebookClient(nb_man, **final_kwargs).execute()
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/drive1/phatnt/Graduation-Thesis-BsC-2026/.venv/lib/python3.12/site-packages/papermill/clientwrap.py", line 45, in execute
-    self.papermill_execute_cells()
-  File "/drive1/phatnt/Graduation-Thesis-BsC-2026/.venv/lib/python3.12/site-packages/papermill/clientwrap.py", line 72, in papermill_execute_cells
-    self.execute_cell(cell, index)
-  File "/drive1/phatnt/Graduation-Thesis-BsC-2026/.venv/lib/python3.12/site-packages/jupyter_core/utils/__init__.py", line 165, in wrapped
-    return loop.run_until_complete(inner)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/usr/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
-    return future.result()
-           ^^^^^^^^^^^^^^^
-  File "/drive1/phatnt/Graduation-Thesis-BsC-2026/.venv/lib/python3.12/site-packages/nbclient/client.py", line 1005, in async_execute_cell
-    exec_reply = await self.task_poll_for_reply
-                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/drive1/phatnt/Graduation-Thesis-BsC-2026/.venv/lib/python3.12/site-packages/nbclient/client.py", line 791, in _async_poll_for_reply
-    raise CellTimeoutError.error_from_timeout_and_cell(
-nbclient.exceptions.CellTimeoutError: A cell timed out while it was being executed, after 4 seconds.
-The message was: Timeout waiting for IOPub output.
-Here is a preview of the cell contents:
--------------------
-crunch.test(no_determinism_check=True)
+Input Notebook:  v5_augstat.ipynb
+Output Notebook: v5_augstat_output.ipynb
+/drive1/phatnt/Graduation-Thesis-BsC-2026/.venv/lib/python3.12/site-packages/nbformat/__init__.py:96: MissingIDFieldWarning: Cell is missing an id field, this will become a hard error in future nbformat versions. You may want to use `normalize()` on your notebooks before validations (available since nbformat 5.1.4). Previous versions of nbformat are fixing this issue transparently, and will stop doing so in the future.
+  validate(nb)
+Executing:   0%|          | 0/25 [00:00<?, ?cell/s]Executing notebook with kernel: python3
+Executing:   4%|▍         | 1/25 [00:02<00:51,  2.15s/cell]Executing:  16%|█▌        | 4/25 [00:33<03:09,  9.00s/cell]Executing:  32%|███▏      | 8/25 [00:34<01:00,  3.55s/cell]Executing:  48%|████▊     | 12/25 [00:34<00:24,  1.92s/cell]Executing:  60%|██████    | 15/25 [00:34<00:12,  1.29s/cell]Executing:  72%|███████▏  | 18/25 [00:34<00:06,  1.09cell/s]Executing:  92%|█████████▏| 23/25 [00:34<00:01,  1.90cell/s]Executing:  92%|█████████▏| 23/25 [00:50<00:01,  1.90cell/s]Executing:  96%|█████████▌| 24/25 [01:03<00:03,  3.59s/cell]Executing: 100%|██████████| 25/25 [07:42<00:00, 57.48s/cell]Executing: 100%|██████████| 25/25 [07:44<00:00, 18.59s/cell]
 
-print("Submit at: https://hub.crunchdao.com/competitions/causality-discovery/submit/via/notebook")
--------------------
-
+Aborted!
+[IPKernelApp] WARNING | Parent appears to have exited, shutting down.
