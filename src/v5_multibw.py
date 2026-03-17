@@ -1,20 +1,17 @@
-# %% [markdown]
-# # Adia Lab Causal Discovery — 1st Place Solution
-#
-# Faithful reimplementation of [thetourney.github.io/adia-report](https://thetourney.github.io/adia-report/).
-#
-# **Key difference from a naive approach**: the 3rd channel is a **multivariate**
-# kernel regression coefficient — predicting variable j from *all* other variables
-# simultaneously (not just pairwise), using a Gaussian kernel on full-row distance.
-# This captures conditional dependencies critical for causal discovery.
+"""
+v5_multibw.py — v2 baseline + multi-scale bandwidth kernel regression
 
-# %% [markdown]
-# ### Setup
+Changes from v2:
+  - Config: BANDWIDTHS = [0.2, 0.5, 1.0], N_CHANNELS = 2 + len(BANDWIDTHS) = 5
+  - build_edge_tensor: computes kernel regression at each bandwidth,
+    producing 5 channels: [sorted_u, sorted_v, coeff_bw0.2, coeff_bw0.5, coeff_bw1.0]
+  - StemLayer: Linear(5, d) instead of Linear(3, d)
+  - Everything else unchanged from v2.
 
-# %% [markdown]
-# ### Imports
+Usage:
+    python v5_multibw.py
+"""
 
-# %%
 import typing
 import os
 from tqdm.auto import tqdm
@@ -32,11 +29,12 @@ import pytorch_lightning as pl
 import networkx as nx
 from sklearn.model_selection import train_test_split
 
-# %% [markdown]
-# ### Configuration
+import pickle
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
-# %%
-# @crunch/keep:on
+# ============================================================
+# Configuration
+# ============================================================
 N_OBS = 1000
 N_KERNEL = 1000
 N_CLASSES = 8
@@ -49,17 +47,17 @@ CLASS_NAMES = [
     "Independent",
 ]
 
-# === v5 config ===
-N_EDGE_STATS = 2   # partial_corr, residual_asym (per edge scalars)
-AUG_NOISE_STD = 0.01  # Gaussian noise added to edge features during training
+# === Multi-bandwidth config ===
+BANDWIDTHS = [0.2, 0.5, 1.0]   # small, medium, large scale
+N_CHANNELS = 2 + len(BANDWIDTHS)  # sorted_u + sorted_v + one coeff per bandwidth
+
+MAX_EPOCHS = 30
+LOCAL_CACHE_DIR = "dataset_cache/"
 
 
-# %% [markdown]
-# ### Graph Utilities
-
-# %%
-# @crunch/keep:on
-
+# ============================================================
+# Graph Utilities (unchanged from v2)
+# ============================================================
 def graph_nodes_representation(graph, nodelist):
     adjacency_matrix = nx.adjacency_matrix(graph, nodelist=nodelist).todense()
     return tuple(adjacency_matrix.flatten())
@@ -119,21 +117,11 @@ def transform_proba_to_DAG(nodes, pred):
                 G.remove_edge(n1, n2)
     return nx.to_numpy_array(G)
 
-# %% [markdown]
-# ### Data Preprocessing
-#
-# **v5 changes from v2 baseline:**
-# 1. `build_edge_tensor` now also computes **edge-level statistics** (partial correlation,
-#    residual asymmetry) as scalar features per edge. These are NOT used as conv channels —
-#    they're injected after conv pooling in the merge step.
-# 2. Light **Gaussian noise augmentation** on edge features during training.
-#
-# The 3-channel conv input is unchanged from v2 (sorted_u, sorted_v, kernel_coeff).
-#
 
-# %%
+# ============================================================
+# Data Preprocessing — Multi-bandwidth kernel regression
+# ============================================================
 def _edge_type(u_name, v_name):
-    """Edge type encoding (7 types) as described in the report."""
     uX, uY = u_name == "X", u_name == "Y"
     vX, vY = v_name == "X", v_name == "Y"
     if uX and not vY:  return 0
@@ -144,9 +132,10 @@ def _edge_type(u_name, v_name):
     if not uX and not uY and vY: return 5
     return 6
 
+
 def compute_multivariate_kernel_coefficients(
     data: np.ndarray, n_sub: int = None, bandwidth: float = 0.5,
-) -> np.ndarray:
+) -> dict:
     if n_sub is None:
         n_sub = N_KERNEL
     N, p = data.shape
@@ -180,70 +169,66 @@ def compute_multivariate_kernel_coefficients(
     return coeff_map
 
 
-def compute_edge_statistics(data: np.ndarray) -> tuple:
-    """
-    Compute per-edge scalar statistics for stat injection.
-
-    Returns:
-        pcorr_matrix:  (p, p) partial correlation via precision matrix
-        resid_matrix:  (p, p) residual-cause correlation for direction asymmetry
-    """
-    N, p = data.shape
-
-    # --- Partial correlation via precision matrix ---
-    cov = np.cov(data.T)
-    cov += 1e-6 * np.eye(p)
-    try:
-        precision = np.linalg.inv(cov)
-    except np.linalg.LinAlgError:
-        precision = np.eye(p)
-
-    diag = np.sqrt(np.maximum(np.diag(precision), 1e-10))
-    pcorr = -precision / np.outer(diag, diag)
-    np.fill_diagonal(pcorr, 0.0)
-
-    # --- Residual asymmetry via linear regression ---
-    resid_corr = np.zeros((p, p), dtype=np.float32)
-    for i in range(p):
-        xi = data[:, i]
-        xi_var = np.var(xi)
-        if xi_var < 1e-10:
-            continue
-        xi_mean = xi.mean()
-        for j in range(p):
-            if i == j:
-                continue
-            xj = data[:, j]
-            b = np.cov(xi, xj)[0, 1] / (xi_var + 1e-10)
-            a = xj.mean() - b * xi_mean
-            residuals = xj - (a + b * xi)
-            r_std = np.std(residuals)
-            if r_std < 1e-10:
-                resid_corr[i, j] = 0.0
-            else:
-                resid_corr[i, j] = np.corrcoef(residuals, xi)[0, 1]
-
-    return pcorr.astype(np.float32), resid_corr
-
-
 def build_edge_tensor(df: pd.DataFrame) -> tuple:
     """
-    Build edge data tensor, edge types, AND edge-level statistics.
+    Build multi-bandwidth edge tensor.
+
+    Channels per edge (u→v):
+      Ch 0: sorted u observations
+      Ch 1: v observations sorted by u
+      Ch 2: kernel regression coeff at bandwidth=0.2 (sharp/local)
+      Ch 3: kernel regression coeff at bandwidth=0.5 (medium)
+      Ch 4: kernel regression coeff at bandwidth=1.0 (smooth/global)
 
     Returns:
-      edge_data:   (E, 3, N) float32      — 3-channel sorted features (unchanged)
+      edge_data:   (E, N_CHANNELS, N) float32
       edge_types:  (E,) int64
-      edge_stats:  (E, N_EDGE_STATS) float32 — per-edge scalar statistics
     """
     cols = list(df.columns)
     p = len(cols)
     data = df.values.astype(np.float32)
     N = data.shape[0]
 
-    coeff_map = compute_multivariate_kernel_coefficients(data)
-    pcorr_matrix, resid_matrix = compute_edge_statistics(data)
+    # Compute kernel regression at each bandwidth
+    # Share the same subsample across bandwidths for consistency
+    n_sub = min(N_KERNEL, N)
+    sub_idx = np.random.choice(N, n_sub, replace=False)
 
-    edges, edge_types, edge_stats = [], [], []
+    coeff_maps = []
+    for bw in BANDWIDTHS:
+        # Use same subsample for all bandwidths
+        data_sub = data[sub_idx]
+        diff = data_sub[:, None, :] - data_sub[None, :, :]
+        sq_dist = (diff ** 2).sum(axis=-1)
+        W = np.exp(-sq_dist / (2 * bw ** 2))
+
+        all_coeffs = {}
+        for j in range(p):
+            other_cols = [k for k in range(p) if k != j]
+            X_design = np.concatenate([np.ones((n_sub, 1)), data_sub[:, other_cols]], axis=1)
+            y_target = data_sub[:, j]
+            A_all = np.einsum('il,la,lb->iab', W, X_design, X_design)
+            b_all = np.einsum('il,la,l->ia', W, X_design, y_target)
+            reg = 1e-6 * np.eye(p)[None, :, :]
+            try:
+                c_all = np.linalg.solve(A_all + reg, b_all[:, :, None]).squeeze(-1)
+            except np.linalg.LinAlgError:
+                c_all = np.zeros((n_sub, p))
+            all_coeffs[j] = (c_all, other_cols)
+
+        dist_to_sub = np.sum((data[:, None, :] - data_sub[None, :, :]) ** 2, axis=-1)
+        nearest = np.argmin(dist_to_sub, axis=1)
+
+        coeff_map = {}
+        for j in range(p):
+            c_all, other_cols = all_coeffs[j]
+            for idx_in_other, k in enumerate(other_cols):
+                coeff_sub = c_all[:, idx_in_other + 1]
+                coeff_map[(k, j)] = coeff_sub[nearest].astype(np.float32)
+        coeff_maps.append(coeff_map)
+
+    edges = []
+    edge_types = []
 
     for i, u_name in enumerate(cols):
         sort_idx = np.argsort(data[:, i])
@@ -254,33 +239,29 @@ def build_edge_tensor(df: pd.DataFrame) -> tuple:
                 continue
 
             v_sorted_by_u = data[sort_idx, j]
-            coeff_sorted = coeff_map[(i, j)][sort_idx]
 
-            edge_tensor = np.stack([u_sorted, v_sorted_by_u, coeff_sorted], axis=0)
+            # Stack: [sorted_u, sorted_v, coeff_bw0, coeff_bw1, coeff_bw2]
+            channels = [u_sorted, v_sorted_by_u]
+            for cm in coeff_maps:
+                channels.append(cm[(i, j)][sort_idx])
+
+            edge_tensor = np.stack(channels, axis=0)  # (N_CHANNELS, N)
             edges.append(edge_tensor)
             edge_types.append(_edge_type(u_name, v_name))
 
-            # Per-edge scalar stats
-            stats = np.array([
-                pcorr_matrix[i, j],
-                resid_matrix[i, j],
-            ], dtype=np.float32)
-            edge_stats.append(stats)
-
-    edge_data  = np.stack(edges, axis=0).astype(np.float32)
+    edge_data = np.stack(edges, axis=0).astype(np.float32)  # (E, N_CHANNELS, N)
     edge_types = np.array(edge_types, dtype=np.int64)
-    edge_stats = np.stack(edge_stats, axis=0).astype(np.float32)
-    return edge_data, edge_types, edge_stats
+    return edge_data, edge_types
 
 
 def _build_single(args):
     df, y_df = args
-    edge_data, edge_types, edge_stats = build_edge_tensor(df)
+    edge_data, edge_types = build_edge_tensor(df)
     cols = list(df.columns)
     p = len(cols)
     result = {
         "edge_data": edge_data, "edge_types": edge_types,
-        "edge_stats": edge_stats, "cols": cols, "p": p,
+        "cols": cols, "p": p,
     }
     if y_df is not None:
         adj_np = y_df.values.astype(np.float32)
@@ -306,13 +287,9 @@ def _build_single(args):
     return result
 
 
-# %% [markdown]
-# ### Dataset & Collation
-
-# %%
-import pickle
-from concurrent.futures import ProcessPoolExecutor, as_completed
-
+# ============================================================
+# Dataset & Collation
+# ============================================================
 class CausalEdgeDataset(Dataset):
     def __init__(self, X_list, y_list=None, n_workers=None, cache_path=None):
         if cache_path and os.path.exists(cache_path):
@@ -335,20 +312,9 @@ class CausalEdgeDataset(Dataset):
                     raw[futures[fut]] = fut.result()
         else:
             raw = [_build_single(a) for a in tqdm(args)]
-        self.samples = []
-        for item in raw:
-            sample = {
-                "edge_data":  torch.from_numpy(item["edge_data"]),
-                "edge_types": torch.from_numpy(item["edge_types"]),
-                "edge_stats": torch.from_numpy(item["edge_stats"]),
-                "cols": item["cols"], "p": item["p"],
-            }
-            if "adj" in item:
-                sample["adj"]         = torch.from_numpy(item["adj"])
-                sample["edge_labels"] = torch.from_numpy(item["edge_labels"])
-                sample["node_labels"] = torch.from_numpy(item["node_labels"])
-                sample["other_nodes"] = item["other_nodes"]
-            self.samples.append(sample)
+
+        self.samples = raw  # store as numpy
+
         if cache_path:
             os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
             print(f"Saving dataset cache to {cache_path}...")
@@ -360,17 +326,27 @@ class CausalEdgeDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        return self.samples[idx]
+        item = self.samples[idx]
+        sample = {
+            "edge_data":  torch.from_numpy(item["edge_data"]),
+            "edge_types": torch.from_numpy(item["edge_types"]),
+            "cols": item["cols"], "p": item["p"],
+        }
+        if "adj" in item:
+            sample["adj"]         = torch.from_numpy(item["adj"])
+            sample["edge_labels"] = torch.from_numpy(item["edge_labels"])
+            sample["node_labels"] = torch.from_numpy(item["node_labels"])
+            sample["other_nodes"] = item["other_nodes"]
+        return sample
+
 
 def collate_fn(batch):
     max_E = max(item["edge_data"].shape[0] for item in batch)
     B = len(batch)
-    n_stats = batch[0]["edge_stats"].shape[1]
 
-    edge_data  = torch.zeros(B, max_E, 3, N_OBS)
+    edge_data  = torch.zeros(B, max_E, N_CHANNELS, N_OBS)
     edge_types = torch.zeros(B, max_E, dtype=torch.long)
     edge_mask  = torch.zeros(B, max_E, dtype=torch.bool)
-    edge_stats = torch.zeros(B, max_E, n_stats)
 
     max_K = max((item["node_labels"].shape[0] if "node_labels" in item else 0) for item in batch)
     edge_labels = torch.full((B, max_E), -1, dtype=torch.long)
@@ -385,7 +361,6 @@ def collate_fn(batch):
         edge_data[b, :E]  = item["edge_data"]
         edge_types[b, :E] = item["edge_types"]
         edge_mask[b, :E]  = True
-        edge_stats[b, :E] = item["edge_stats"]
         cols_list.append(item["cols"])
         if "edge_labels" in item:
             has_labels = True
@@ -395,7 +370,7 @@ def collate_fn(batch):
             node_mask[b, :K] = True
 
     out = {"edge_data": edge_data, "edge_types": edge_types,
-           "edge_mask": edge_mask, "edge_stats": edge_stats, "cols": cols_list}
+           "edge_mask": edge_mask, "cols": cols_list}
     if has_labels:
         out["edge_labels"] = edge_labels
         out["node_labels"] = node_labels
@@ -403,24 +378,10 @@ def collate_fn(batch):
     return out
 
 
-# %% [markdown]
-# ### Model Architecture — v5
-#
-# **v5 = v2 baseline + edge-level stat injection + training noise augmentation.**
-#
-# Changes from v2:
-# 1. **Edge statistics** (partial corr, residual asymmetry) are computed as scalars per edge
-#    during preprocessing. A small MLP projects these into d-dim, then they're merged
-#    alongside the edge type embedding: `MergeOperator([conv_emb, type_emb, stat_emb])`.
-# 2. **Gaussian noise** (std=0.01) is added to edge features during training for regularization.
-#
-# The 3-channel conv path is completely unchanged from v2.
-# The merge step goes from 2-input to 3-input (conv + type + stats).
-#
-
-# %%
+# ============================================================
+# Model (v2 architecture, just StemLayer takes N_CHANNELS)
+# ============================================================
 class ConvBlock(nn.Module):
-    """Residual Conv1d + GroupNorm + GELU (Fig. 5 in report)."""
     def __init__(self, d, kernel_size=3, n_groups=8):
         super().__init__()
         self.conv = nn.Conv1d(d, d, kernel_size, padding=kernel_size // 2, bias=False)
@@ -430,7 +391,6 @@ class ConvBlock(nn.Module):
         return x + self.act(self.norm(self.conv(x)))
 
 class MergeOperator(nn.Module):
-    """Concat inputs → Linear → LayerNorm → GELU (Fig. 6 in report)."""
     def __init__(self, n_inputs, d):
         super().__init__()
         self.linear = nn.Linear(n_inputs * d, d)
@@ -440,15 +400,14 @@ class MergeOperator(nn.Module):
         return self.act(self.norm(self.linear(torch.cat(inputs, dim=-1))))
 
 class StemLayer(nn.Module):
-    """Linear 3 → d_model applied per-observation."""
-    def __init__(self, d):
+    def __init__(self, d, n_channels=None):
         super().__init__()
-        self.linear = nn.Linear(3, d)
+        n_channels = n_channels or N_CHANNELS
+        self.linear = nn.Linear(n_channels, d)
     def forward(self, x):
         return self.linear(x.permute(0, 2, 1)).permute(0, 2, 1)
 
 class EdgeFeatureExtractor(nn.Module):
-    """Stem + 5×ConvBlock + AvgPool → 64-dim embedding."""
     def __init__(self, d=64, n_blocks=5):
         super().__init__()
         self.stem = StemLayer(d)
@@ -459,29 +418,7 @@ class EdgeFeatureExtractor(nn.Module):
         x = self.blocks(x)
         return self.pool(x).squeeze(-1)
 
-
-class StatProjector(nn.Module):
-    """
-    Project per-edge scalar statistics into d-dim embedding.
-
-    Takes (partial_corr, residual_asym) per edge → MLP → d-dim.
-    Injected at the merge step alongside conv_emb and type_emb.
-    """
-    def __init__(self, n_stats, d):
-        super().__init__()
-        self.proj = nn.Sequential(
-            nn.Linear(n_stats, d),
-            nn.GELU(),
-            nn.Linear(d, d),
-            nn.LayerNorm(d),
-        )
-
-    def forward(self, stats):
-        return self.proj(stats)
-
-
 class SelfAttentionLayer(nn.Module):
-    """Standard multi-head self-attention + FFN with pre-norm residuals."""
     def __init__(self, d=64, n_heads=4):
         super().__init__()
         self.attn = nn.MultiheadAttention(d, n_heads, batch_first=True)
@@ -497,70 +434,38 @@ class SelfAttentionLayer(nn.Module):
 
 class ADIAModel(nn.Module):
     """
-    v5: Baseline + edge-level stat injection + training noise.
+    v2 architecture with multi-bandwidth channels.
 
-    Pipeline:
-      1. EdgeFeatureExtractor: (B,E,3,N) → (B,E,d)        [unchanged]
-      2. StatProjector: (B,E,2) → (B,E,d)                  [NEW]
-      3. EdgeTypeMerge: [conv_emb, type_emb, stat_emb] → d  [3-input merge]
-      4. 2× SelfAttention
-      5. Edge head + Node head
-
-    Training augmentation: Gaussian noise on edge features.
+    Only change: StemLayer accepts N_CHANNELS (5) instead of 3.
+    The rest is identical to v2. 2-input merge (conv + type).
     """
-    def __init__(self, d=None, n_edge_types=None, n_edge_stats=None,
-                 aug_noise_std=0.0):
+    def __init__(self, d=None, n_edge_types=None):
         super().__init__()
         d = d or D_MODEL
         n_edge_types = n_edge_types or N_EDGE_TYPES
-        n_edge_stats = n_edge_stats or N_EDGE_STATS
-
         self.d = d
-        self.aug_noise_std = aug_noise_std
 
         self.extractor = EdgeFeatureExtractor(d)
-        self.stat_proj = StatProjector(n_edge_stats, d)
         self.edge_type_emb = nn.Embedding(n_edge_types, d)
-
-        # 3-input merge: conv + type + stats
-        self.edge_merge = MergeOperator(n_inputs=3, d=d)
-
+        self.edge_merge = MergeOperator(n_inputs=2, d=d)
         self.attn_layers = nn.ModuleList([SelfAttentionLayer(d) for _ in range(2)])
         self.edge_head = nn.Linear(d, 2)
         self.node_merge = MergeOperator(n_inputs=4, d=d)
         self.node_head = nn.Linear(d, N_CLASSES)
 
-    def forward(self, edge_data, edge_types, edge_mask, cols_list, edge_stats=None):
+    def forward(self, edge_data, edge_types, edge_mask, cols_list):
         B, E, C, N = edge_data.shape
 
-        # --- Training augmentation: add Gaussian noise to edge features ---
-        if self.training and self.aug_noise_std > 0:
-            edge_data = edge_data + torch.randn_like(edge_data) * self.aug_noise_std
-
-        # --- Conv path (unchanged from v2) ---
         edge_emb = self.extractor(edge_data.view(B * E, C, N)).view(B, E, self.d)
-
-        # --- Edge type embedding ---
         type_emb = self.edge_type_emb(edge_types)
+        edge_emb = self.edge_merge([edge_emb, type_emb])
 
-        # --- Stat projection (NEW) ---
-        if edge_stats is not None:
-            stat_emb = self.stat_proj(edge_stats)
-        else:
-            stat_emb = torch.zeros_like(edge_emb)
-
-        # --- 3-way merge ---
-        edge_emb = self.edge_merge([edge_emb, type_emb, stat_emb])
-
-        # --- Self-attention ---
         pad_mask = ~edge_mask
         for attn in self.attn_layers:
             edge_emb = attn(edge_emb, key_padding_mask=pad_mask)
 
-        # --- Edge head ---
         edge_logits = self.edge_head(edge_emb)
 
-        # --- Node head ---
         node_logits_list = []
         for b in range(B):
             cols = cols_list[b]
@@ -596,13 +501,9 @@ class ADIAModel(nn.Module):
         return edge_logits, node_logits_list
 
 
-# %% [markdown]
-# ### Training Wrapper
-#
-# Loss = CE(edge classification) + CE(node classification),
-# both weighted by inverse class frequency as described in the report.
-
-# %%
+# ============================================================
+# Training Wrapper (v2 style, no stat injection)
+# ============================================================
 def compute_class_weights(y_list):
     adjacency_label = get_adjacency_label()
     counts = torch.zeros(N_CLASSES)
@@ -632,13 +533,13 @@ def compute_edge_class_weights(y_list):
     w = 1.0 / (counts + 1e-6)
     return w / w.sum() * 2
 
+
 class ADIAModelWrapper(pl.LightningModule):
     def __init__(self, d=None, node_class_weights=None,
-                 edge_class_weights=None, lr=1e-3, max_epochs=20,
-                 aug_noise_std=0.0):
+                 edge_class_weights=None, lr=1e-3, max_epochs=20):
         super().__init__()
         d = d or D_MODEL
-        self.model = ADIAModel(d, aug_noise_std=aug_noise_std)
+        self.model = ADIAModel(d)
         self.lr = lr
         self.max_epochs = max_epochs
         self.node_criterion = nn.CrossEntropyLoss(
@@ -654,7 +555,6 @@ class ADIAModelWrapper(pl.LightningModule):
             batch["edge_types"].to(self.device),
             batch["edge_mask"].to(self.device),
             batch["cols"],
-            edge_stats=batch["edge_stats"].to(self.device),
         )
 
     def _compute_loss(self, batch, split):
@@ -699,22 +599,20 @@ class ADIAModelWrapper(pl.LightningModule):
         return [opt], [{"scheduler": sched, "interval": "epoch"}]
 
 
-# %% [markdown]
-# ### Inference
-
-# %%
+# ============================================================
+# Inference
+# ============================================================
 @torch.no_grad()
 def infer_single(df, model, device="cpu"):
     model = model.eval()
     cols = list(df.columns)
     p = len(cols)
-    edge_data, edge_types, edge_stats = build_edge_tensor(df)
+    edge_data, edge_types = build_edge_tensor(df)
     edge_data_t  = torch.tensor(edge_data).unsqueeze(0).to(device)
     edge_types_t = torch.tensor(edge_types).unsqueeze(0).to(device)
     edge_mask_t  = torch.ones(1, len(edge_types), dtype=torch.bool, device=device)
-    edge_stats_t = torch.tensor(edge_stats).unsqueeze(0).to(device)
     edge_logits, node_logits_list = model(
-        edge_data_t, edge_types_t, edge_mask_t, [cols], edge_stats=edge_stats_t
+        edge_data_t, edge_types_t, edge_mask_t, [cols]
     )
     edge_probs = torch.softmax(edge_logits[0], dim=-1)[:, 1]
     E_mat = np.zeros((p, p))
@@ -747,80 +645,20 @@ def infer_single(df, model, device="cpu"):
                 A.loc[src, dst] = 1
     return A
 
-@torch.no_grad()
-def infer_batch(dfs, model, device="cpu", batch_size=32):
-    model = model.eval()
-    from concurrent.futures import ProcessPoolExecutor
-    import multiprocessing as mp
-    n_workers = max(1, mp.cpu_count() - 1)
-    args = [(df, None) for df in dfs]
-    print(f"Building edge tensors ({len(dfs)} graphs, {n_workers} workers)...")
-    ctx = mp.get_context('fork')
-    with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
-        raw = list(tqdm(pool.map(_build_single, args, chunksize=8), total=len(args)))
-    all_items = [{
-        "edge_data": torch.from_numpy(item["edge_data"]),
-        "edge_types": torch.from_numpy(item["edge_types"]),
-        "edge_stats": torch.from_numpy(item["edge_stats"]),
-        "cols": item["cols"], "p": item["p"],
-    } for item in raw]
-    results = [None] * len(all_items)
-    patterns = {
-        "Confounder":        lambda n: [(n, "X"), (n, "Y")],
-        "Collider":          lambda n: [("X", n), ("Y", n)],
-        "Mediator":          lambda n: [("X", n), (n, "Y")],
-        "Cause of X":        lambda n: [(n, "X")],
-        "Cause of Y":        lambda n: [(n, "Y")],
-        "Consequence of X":  lambda n: [("X", n)],
-        "Consequence of Y":  lambda n: [("Y", n)],
-        "Independent":       lambda n: [],
-    }
-    for start in tqdm(range(0, len(all_items), batch_size), desc="infering batch"):
-        batch_items = all_items[start:start + batch_size]
-        batch = collate_fn(batch_items)
-        edge_logits, node_logits_list = model(
-            batch["edge_data"].to(device), batch["edge_types"].to(device),
-            batch["edge_mask"].to(device), batch["cols"],
-            edge_stats=batch["edge_stats"].to(device),
-        )
-        for b, item in enumerate(batch_items):
-            cols, p, idx = item["cols"], item["p"], start + b
-            edge_probs = torch.softmax(edge_logits[b], dim=-1)[:, 1]
-            E_mat = np.zeros((p, p))
-            count = 0
-            for ii in range(p):
-                for jj in range(p):
-                    if ii != jj:
-                        E_mat[ii, jj] = edge_probs[count].item()
-                        count += 1
-            adj = transform_proba_to_DAG(cols, E_mat).astype(int)
-            A = pd.DataFrame(adj, columns=cols, index=cols)
-            if node_logits_list[b] is not None:
-                other_nodes = [n for n in cols if n not in ("X", "Y")]
-                node_preds = torch.argmax(node_logits_list[b], dim=-1)
-                for k, node_name in enumerate(other_nodes):
-                    pred_class = CLASS_NAMES[node_preds[k].item()]
-                    A.loc[node_name, :] = 0
-                    A.loc[:, node_name] = 0
-                    for (src, dst) in patterns[pred_class](node_name):
-                        A.loc[src, dst] = 1
-            results[idx] = A
-    return results
 
 @torch.no_grad()
 def infer_batch_local(dfs, model, device="cpu", batch_size=32, cache_dir=None):
     model = model.eval()
     cache_path = None
     if cache_dir:
-        cache_path = os.path.join(cache_dir, f"infer_edge_tensors_v5_nk{N_KERNEL}.pkl")
+        bw_tag = "_".join(f"{b}" for b in BANDWIDTHS)
+        cache_path = os.path.join(cache_dir, f"infer_edge_tensors_multibw_{bw_tag}_nk{N_KERNEL}.pkl")
     if cache_path and os.path.exists(cache_path):
-        import pickle
         print(f"Loading cached edge tensors from {cache_path}...")
         with open(cache_path, "rb") as f:
             all_items = pickle.load(f)
         print(f"Loaded {len(all_items)} cached edge tensors.")
     else:
-        from concurrent.futures import ProcessPoolExecutor
         import multiprocessing as mp
         n_workers = max(1, mp.cpu_count() - 1)
         args = [(df, None) for df in dfs]
@@ -831,11 +669,9 @@ def infer_batch_local(dfs, model, device="cpu", batch_size=32, cache_dir=None):
         all_items = [{
             "edge_data": torch.from_numpy(item["edge_data"]),
             "edge_types": torch.from_numpy(item["edge_types"]),
-            "edge_stats": torch.from_numpy(item["edge_stats"]),
             "cols": item["cols"], "p": item["p"],
         } for item in raw]
         if cache_path:
-            import pickle
             os.makedirs(cache_dir, exist_ok=True)
             with open(cache_path, "wb") as f:
                 pickle.dump(all_items, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -856,7 +692,6 @@ def infer_batch_local(dfs, model, device="cpu", batch_size=32, cache_dir=None):
         edge_logits, node_logits_list = model(
             batch["edge_data"].to(device), batch["edge_types"].to(device),
             batch["edge_mask"].to(device), batch["cols"],
-            edge_stats=batch["edge_stats"].to(device),
         )
         for b, item in enumerate(batch_items):
             cols, p, idx = item["cols"], item["p"], start + b
@@ -883,14 +718,9 @@ def infer_batch_local(dfs, model, device="cpu", batch_size=32, cache_dir=None):
     return results
 
 
-# %% [markdown]
-# ### CrunchDAO Interface — `train` & `infer`
-
-# %%
-# @crunch/keep:on
-MAX_EPOCHS = 30
-LOCAL_CACHE_DIR = "dataset_cache/"
-
+# ============================================================
+# Train & Infer
+# ============================================================
 def train(
     X_train: typing.Dict[str, pd.DataFrame],
     y_train: typing.Dict[str, pd.DataFrame],
@@ -915,19 +745,20 @@ def train(
         torch.save(node_w, node_w_path)
         torch.save(edge_w, edge_w_path)
 
-    dataset_path = os.path.join(LOCAL_CACHE_DIR, f"train_dataset_v5_nk{N_KERNEL}.pkl")
-    dataset = CausalEdgeDataset(X_list, y_list, cache_path=dataset_path, n_workers=40)
+    bw_tag = "_".join(f"{b}" for b in BANDWIDTHS)
+    dataset_path = os.path.join(
+        LOCAL_CACHE_DIR, f"train_dataset_multibw_{bw_tag}_nk{N_KERNEL}.pkl"
+    )
+    dataset = CausalEdgeDataset(X_list, y_list, cache_path=dataset_path, n_workers=47)
 
     wrapper = ADIAModelWrapper(
         d=D_MODEL, node_class_weights=node_w,
         edge_class_weights=edge_w, lr=1e-3, max_epochs=MAX_EPOCHS,
-        aug_noise_std=AUG_NOISE_STD,
     )
 
     total_params = sum(p.numel() for p in wrapper.model.parameters())
-    trainable_params = sum(p.numel() for p in wrapper.model.parameters() if p.requires_grad)
-    print(f"Model params: {total_params:,} total, {trainable_params:,} trainable")
-    print(f"Config: stat_injection=ON, aug_noise={AUG_NOISE_STD}")
+    print(f"Model params: {total_params:,}")
+    print(f"Config: bandwidths={BANDWIDTHS}, channels={N_CHANNELS}")
 
     trainer = pl.Trainer(
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
@@ -936,14 +767,15 @@ def train(
     )
     loader = DataLoader(
         dataset, batch_size=16, shuffle=True, drop_last=False,
-        num_workers=10, collate_fn=collate_fn,
+        num_workers=5, collate_fn=collate_fn,
     )
     print("Starting training...")
     trainer.fit(wrapper, loader)
 
-    path = os.path.join(model_directory_path, "model_v5_augstat.pt")
+    path = os.path.join(model_directory_path, "model.pt")
     torch.save(wrapper.model.state_dict(), path)
     print(f"Model saved to {path}")
+
 
 def infer(
     X_test: typing.Dict[str, pd.DataFrame],
@@ -951,9 +783,9 @@ def infer(
     id_column_name: str,
     prediction_column_name: str,
 ) -> pd.DataFrame:
-    path = os.path.join(model_directory_path, "model_v5_augstat.pt")
+    path = os.path.join(model_directory_path, "model_v5_multibw.pt")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = ADIAModel(d=D_MODEL, aug_noise_std=0.0)  # no noise at inference
+    model = ADIAModel(d=D_MODEL)
     model.load_state_dict(torch.load(path, map_location=device, weights_only=True))
     model.to(device).eval()
 
@@ -961,8 +793,8 @@ def infer(
     dfs = [X_test[n] for n in names]
 
     print(f"Batch inference on {len(dfs)} samples (device={device})...")
-    adj_list = infer_batch_local(dfs, model, device=device, batch_size=128,
-                           cache_dir=LOCAL_CACHE_DIR)
+    adj_list = infer_batch_local(dfs, model, device=device, batch_size=64,
+                                 cache_dir=LOCAL_CACHE_DIR)
 
     submission = {}
     for name, A in zip(names, adj_list):
@@ -976,26 +808,50 @@ def infer(
     return s
 
 
-# %% [markdown]
-# ### Local Training & Evaluation
+# ============================================================
+# Main
+# ============================================================
+if __name__ == "__main__":
+    # X_train = pd.read_pickle("data/X_train.pickle")
+    # y_train = pd.read_pickle("data/y_train.pickle")
+    # print(f"Loaded {len(X_train)} training samples.")
 
-# %%
+    # train(X_train, y_train, model_directory_path="resources")
 
+    # Local evaluation
+    X_test = pd.read_pickle("data/X_test_reduced.pickle")
+    y_test = pd.read_pickle("data/y_test_reduced.pickle")
 
-# %% [markdown]
-# ### CrunchDAO Test & Submit
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = ADIAModel(d=D_MODEL)
+    model.load_state_dict(torch.load("resources/model_v5_multibw.pt", map_location=device, weights_only=True))
+    model.to(device).eval()
 
-# # %%
-# X_train = pd.read_pickle("data/X_train.pickle")
-# y_train = pd.read_pickle("data/y_train.pickle")
-# print(f"Loaded {len(X_train)} training samples.")
+    names = list(X_test.keys())
+    dfs = [X_test[n] for n in names]
+    adj_list = infer_batch_local(dfs, model, device=device, batch_size=64,
+                                 cache_dir=LOCAL_CACHE_DIR)
 
-# # %%
-# train(X_train, y_train, model_directory_path="resources")
+    adjacency_label = get_adjacency_label()
+    class_correct = {c: 0 for c in CLASS_NAMES}
+    class_total = {c: 0 for c in CLASS_NAMES}
 
-X_test = pd.read_pickle("data/X_test_reduced.pickle")
-y_pred = infer(X_test, model_directory_path="resources",
-              id_column_name="example_id", prediction_column_name="prediction")
-y_pred.to_parquet("prediction/v5.parquet")
+    for name, A_pred in zip(names, adj_list):
+        y_df = y_test[name]
+        pred_labels = get_labels(A_pred, adjacency_label)
+        true_labels = get_labels(y_df, adjacency_label)
+        for v in true_labels:
+            true_cls = true_labels[v]
+            pred_cls = pred_labels.get(v, "Independent")
+            class_total[true_cls] += 1
+            if pred_cls == true_cls:
+                class_correct[true_cls] += 1
 
-# crunch.test(no_determinism_check=True)
+    print("\nPer-class accuracy:")
+    accs = []
+    for cls in CLASS_NAMES:
+        n = class_total[cls]
+        acc = class_correct[cls] / n if n > 0 else 0.0
+        accs.append(acc)
+        print(f"  {cls:25s}: {acc:.4f}  (n={n})")
+    print(f"\nBalanced Accuracy: {np.mean(accs):.4f}")

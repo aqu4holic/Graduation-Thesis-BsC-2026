@@ -1,20 +1,10 @@
-# %% [markdown]
-# # Adia Lab Causal Discovery — 1st Place Solution
-#
-# Faithful reimplementation of [thetourney.github.io/adia-report](https://thetourney.github.io/adia-report/).
-#
-# **Key difference from a naive approach**: the 3rd channel is a **multivariate**
-# kernel regression coefficient — predicting variable j from *all* other variables
-# simultaneously (not just pairwise), using a Gaussian kernel on full-row distance.
-# This captures conditional dependencies critical for causal discovery.
+"""
+v5_augstat.py — ADIA Causal Discovery: v2 baseline + edge stat injection + column permutation augmentation
 
-# %% [markdown]
-# ### Setup
+Usage:
+    python v5_augstat.py          # train + local eval
+"""
 
-# %% [markdown]
-# ### Imports
-
-# %%
 import typing
 import os
 from tqdm.auto import tqdm
@@ -32,11 +22,12 @@ import pytorch_lightning as pl
 import networkx as nx
 from sklearn.model_selection import train_test_split
 
-# %% [markdown]
-# ### Configuration
+import pickle
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
-# %%
-# @crunch/keep:on
+# ============================================================
+# Configuration
+# ============================================================
 N_OBS = 1000
 N_KERNEL = 1000
 N_CLASSES = 8
@@ -49,17 +40,16 @@ CLASS_NAMES = [
     "Independent",
 ]
 
-# === v5 config ===
-N_EDGE_STATS = 2   # partial_corr, residual_asym (per edge scalars)
-AUG_NOISE_STD = 0.01  # Gaussian noise added to edge features during training
+N_EDGE_STATS = 2       # partial_corr, residual_asym
+AUG_NOISE_STD = 0.01   # Gaussian noise on edge features during training
+N_AUG = 1              # >0 enables X/Y remap augmentation (uses all DAG edges)
+MAX_EPOCHS = 30
+LOCAL_CACHE_DIR = "dataset_cache/"
 
 
-# %% [markdown]
-# ### Graph Utilities
-
-# %%
-# @crunch/keep:on
-
+# ============================================================
+# Graph Utilities
+# ============================================================
 def graph_nodes_representation(graph, nodelist):
     adjacency_matrix = nx.adjacency_matrix(graph, nodelist=nodelist).todense()
     return tuple(adjacency_matrix.flatten())
@@ -119,19 +109,10 @@ def transform_proba_to_DAG(nodes, pred):
                 G.remove_edge(n1, n2)
     return nx.to_numpy_array(G)
 
-# %% [markdown]
-# ### Data Preprocessing
-#
-# **v5 changes from v2 baseline:**
-# 1. `build_edge_tensor` now also computes **edge-level statistics** (partial correlation,
-#    residual asymmetry) as scalar features per edge. These are NOT used as conv channels —
-#    they're injected after conv pooling in the merge step.
-# 2. Light **Gaussian noise augmentation** on edge features during training.
-#
-# The 3-channel conv input is unchanged from v2 (sorted_u, sorted_v, kernel_coeff).
-#
 
-# %%
+# ============================================================
+# Data Preprocessing
+# ============================================================
 def _edge_type(u_name, v_name):
     """Edge type encoding (7 types) as described in the report."""
     uX, uY = u_name == "X", u_name == "Y"
@@ -143,6 +124,7 @@ def _edge_type(u_name, v_name):
     if not uX and not uY and vX: return 4
     if not uX and not uY and vY: return 5
     return 6
+
 
 def compute_multivariate_kernel_coefficients(
     data: np.ndarray, n_sub: int = None, bandwidth: float = 0.5,
@@ -182,15 +164,15 @@ def compute_multivariate_kernel_coefficients(
 
 def compute_edge_statistics(data: np.ndarray) -> tuple:
     """
-    Compute per-edge scalar statistics for stat injection.
+    Compute per-edge scalar statistics.
 
     Returns:
         pcorr_matrix:  (p, p) partial correlation via precision matrix
-        resid_matrix:  (p, p) residual-cause correlation for direction asymmetry
+        resid_matrix:  (p, p) residual-cause correlation
     """
     N, p = data.shape
 
-    # --- Partial correlation via precision matrix ---
+    # Partial correlation via precision matrix
     cov = np.cov(data.T)
     cov += 1e-6 * np.eye(p)
     try:
@@ -202,7 +184,7 @@ def compute_edge_statistics(data: np.ndarray) -> tuple:
     pcorr = -precision / np.outer(diag, diag)
     np.fill_diagonal(pcorr, 0.0)
 
-    # --- Residual asymmetry via linear regression ---
+    # Residual asymmetry via linear regression
     resid_corr = np.zeros((p, p), dtype=np.float32)
     for i in range(p):
         xi = data[:, i]
@@ -228,10 +210,8 @@ def compute_edge_statistics(data: np.ndarray) -> tuple:
 
 def build_edge_tensor(df: pd.DataFrame) -> tuple:
     """
-    Build edge data tensor, edge types, AND edge-level statistics.
-
     Returns:
-      edge_data:   (E, 3, N) float32      — 3-channel sorted features (unchanged)
+      edge_data:   (E, 3, N) float32      — 3-channel sorted features
       edge_types:  (E,) int64
       edge_stats:  (E, N_EDGE_STATS) float32 — per-edge scalar statistics
     """
@@ -260,7 +240,6 @@ def build_edge_tensor(df: pd.DataFrame) -> tuple:
             edges.append(edge_tensor)
             edge_types.append(_edge_type(u_name, v_name))
 
-            # Per-edge scalar stats
             stats = np.array([
                 pcorr_matrix[i, j],
                 resid_matrix[i, j],
@@ -274,6 +253,7 @@ def build_edge_tensor(df: pd.DataFrame) -> tuple:
 
 
 def _build_single(args):
+    """Worker: builds edge tensor + labels for one (df, y_df) pair."""
     df, y_df = args
     edge_data, edge_types, edge_stats = build_edge_tensor(df)
     cols = list(df.columns)
@@ -306,61 +286,226 @@ def _build_single(args):
     return result
 
 
-# %% [markdown]
-# ### Dataset & Collation
+def _remap_xy_names(cols, new_x, new_y):
+    """
+    Build a rename mapping where variable new_x becomes 'X' and new_y becomes 'Y'.
 
-# %%
-import pickle
-from concurrent.futures import ProcessPoolExecutor, as_completed
+    Uses two swaps to create a valid permutation of names:
+      1. Swap new_x ↔ 'X' (so new_x gets the name 'X')
+      2. Swap new_y ↔ 'Y' (so new_y gets the name 'Y')
+
+    Returns: dict mapping old_name → new_name
+    """
+    result = list(cols)
+    pos = {c: i for i, c in enumerate(cols)}
+
+    # Swap 1: new_x into the "X" name slot
+    i_nx, i_x = pos[new_x], pos["X"]
+    result[i_nx], result[i_x] = result[i_x], result[i_nx]
+
+    # Swap 2: new_y into the "Y" name slot (using updated positions)
+    pos2 = {c: i for i, c in enumerate(result)}
+    i_ny, i_y = pos2[new_y], pos2["Y"]
+    result[i_ny], result[i_y] = result[i_y], result[i_ny]
+
+    return {cols[i]: result[i] for i in range(len(cols))}
+
+
+def _build_augmented(args):
+    """
+    Build original + X/Y-remapped copies (as in 3rd place solution).
+
+    For every directed edge A→B in the ground truth DAG, we create a new
+    training sample where A is renamed to 'X' and B to 'Y'. The observations
+    stay identical — only column names change. This effectively creates new
+    classification problems from the same graph.
+
+    The 3rd place team got ~11.21× augmentation on average from this, with a
+    ~5% performance improvement.
+
+    Labels are always correct because:
+    - The adjacency matrix is renamed consistently with the data
+    - _build_single looks up labels via .loc with the new names
+    """
+    df, y_df, n_aug = args  # n_aug is ignored; we use all valid edges
+    results = []
+
+    # Original (unpermuted)
+    results.append(_build_single((df, y_df)))
+
+    if y_df is None:
+        return results
+
+    cols = list(df.columns)
+    adj_np = y_df.values
+    col_idx = {c: i for i, c in enumerate(y_df.columns)}
+
+    # Find all directed edges A→B in the ground truth DAG
+    for a_name in y_df.columns:
+        for b_name in y_df.columns:
+            if a_name == b_name:
+                continue
+            a_i, b_i = col_idx[a_name], col_idx[b_name]
+            if adj_np[a_i, b_i] != 1:
+                continue
+            # Skip the original X→Y (that's the original sample)
+            if a_name == "X" and b_name == "Y":
+                continue
+
+            # Build rename mapping: a_name → "X", b_name → "Y"
+            rename_map = _remap_xy_names(cols, a_name, b_name)
+
+            # Rename DataFrame columns (data stays the same)
+            df_remap = df.rename(columns=rename_map)
+
+            # Rename adjacency matrix rows AND columns
+            y_remap = y_df.rename(index=rename_map, columns=rename_map)
+
+            results.append(_build_single((df_remap, y_remap)))
+
+    return results
+
+
+# ============================================================
+# Dataset & Collation
+# ============================================================
+SHARD_SIZE = 50_000  # samples per cache shard
+
+def _save_sharded_cache(samples, cache_path):
+    """Save samples as sharded pickle files with numpy arrays (not torch)."""
+    cache_dir = os.path.dirname(cache_path) or "."
+    base = os.path.splitext(os.path.basename(cache_path))[0]
+    shard_dir = os.path.join(cache_dir, base + "_shards")
+    os.makedirs(shard_dir, exist_ok=True)
+
+    n_shards = (len(samples) + SHARD_SIZE - 1) // SHARD_SIZE
+    for i in range(n_shards):
+        start = i * SHARD_SIZE
+        end = min(start + SHARD_SIZE, len(samples))
+        shard_path = os.path.join(shard_dir, f"shard_{i:04d}.pkl")
+        with open(shard_path, "wb") as f:
+            pickle.dump(samples[start:end], f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"  Saved shard {i+1}/{n_shards}: {end - start} samples → {shard_path}")
+
+    # Write metadata
+    meta_path = os.path.join(shard_dir, "meta.pkl")
+    with open(meta_path, "wb") as f:
+        pickle.dump({"n_samples": len(samples), "n_shards": n_shards}, f)
+    print(f"Cached {len(samples)} samples in {n_shards} shards.")
+
+
+def _load_sharded_cache(cache_path):
+    """Load samples from sharded pickle files."""
+    cache_dir = os.path.dirname(cache_path) or "."
+    base = os.path.splitext(os.path.basename(cache_path))[0]
+    shard_dir = os.path.join(cache_dir, base + "_shards")
+
+    meta_path = os.path.join(shard_dir, "meta.pkl")
+    if not os.path.exists(meta_path):
+        return None
+
+    with open(meta_path, "rb") as f:
+        meta = pickle.load(f)
+
+    samples = []
+    for i in range(meta["n_shards"]):
+        shard_path = os.path.join(shard_dir, f"shard_{i:04d}.pkl")
+        with open(shard_path, "rb") as f:
+            samples.extend(pickle.load(f))
+        print(f"  Loaded shard {i+1}/{meta['n_shards']}")
+
+    print(f"Loaded {len(samples)} samples from {meta['n_shards']} shards.")
+    return samples
+
 
 class CausalEdgeDataset(Dataset):
-    def __init__(self, X_list, y_list=None, n_workers=None, cache_path=None):
-        if cache_path and os.path.exists(cache_path):
-            print(f"Loading cached dataset from {cache_path}...")
-            with open(cache_path, "rb") as f:
-                self.samples = pickle.load(f)
-            print(f"Loaded {len(self.samples)} samples from cache.")
-            return
+    """
+    Stores samples as numpy dicts (small cache footprint).
+    Converts to torch tensors lazily in __getitem__.
+    Uses sharded cache files to avoid OOM during save/load.
+    """
+    def __init__(self, X_list, y_list=None, n_workers=None, cache_path=None,
+                 augment=False):
+        # Try loading from sharded cache
+        if cache_path:
+            cached = _load_sharded_cache(cache_path)
+            if cached is not None:
+                self.samples = cached
+                return
+
         if n_workers is None:
             import multiprocessing as mp
             n_workers = max(1, mp.cpu_count() - 1)
-        args = [(X_list[i], y_list[i] if y_list else None) for i in range(len(X_list))]
-        print(f"Building edge dataset ({len(args)} samples, {n_workers} workers)...")
-        if n_workers > 1:
-            raw = [None] * len(args)
-            ctx = __import__('multiprocessing').get_context('fork')
-            with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
-                futures = {pool.submit(_build_single, a): idx for idx, a in enumerate(args)}
-                for fut in tqdm(as_completed(futures), total=len(args)):
-                    raw[futures[fut]] = fut.result()
+
+        use_aug = augment and y_list is not None
+
+        if use_aug:
+            args = [
+                (X_list[i], y_list[i] if y_list else None, 0)
+                for i in range(len(X_list))
+            ]
+            print(f"Building augmented edge dataset ({len(args)} base samples, "
+                  f"X/Y remap augmentation, {n_workers} workers)...")
+
+            if n_workers > 1:
+                raw_nested = [None] * len(args)
+                ctx = __import__('multiprocessing').get_context('fork')
+                with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
+                    futures = {pool.submit(_build_augmented, a): idx for idx, a in enumerate(args)}
+                    for fut in tqdm(as_completed(futures), total=len(args)):
+                        raw_nested[futures[fut]] = fut.result()
+            else:
+                raw_nested = [_build_augmented(a) for a in tqdm(args)]
+
+            raw = []
+            for group in raw_nested:
+                raw.extend(group)
+            avg_aug = len(raw) / len(args)
+            print(f"Total samples after augmentation: {len(raw)} "
+                  f"({avg_aug:.1f}× average)")
         else:
-            raw = [_build_single(a) for a in tqdm(args)]
-        self.samples = []
-        for item in raw:
-            sample = {
-                "edge_data":  torch.from_numpy(item["edge_data"]),
-                "edge_types": torch.from_numpy(item["edge_types"]),
-                "edge_stats": torch.from_numpy(item["edge_stats"]),
-                "cols": item["cols"], "p": item["p"],
-            }
-            if "adj" in item:
-                sample["adj"]         = torch.from_numpy(item["adj"])
-                sample["edge_labels"] = torch.from_numpy(item["edge_labels"])
-                sample["node_labels"] = torch.from_numpy(item["node_labels"])
-                sample["other_nodes"] = item["other_nodes"]
-            self.samples.append(sample)
+            args = [
+                (X_list[i], y_list[i] if y_list else None)
+                for i in range(len(X_list))
+            ]
+            print(f"Building edge dataset ({len(args)} samples, {n_workers} workers)...")
+            if n_workers > 1:
+                raw = [None] * len(args)
+                ctx = __import__('multiprocessing').get_context('fork')
+                with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
+                    futures = {pool.submit(_build_single, a): idx for idx, a in enumerate(args)}
+                    for fut in tqdm(as_completed(futures), total=len(args)):
+                        raw[futures[fut]] = fut.result()
+            else:
+                raw = [_build_single(a) for a in tqdm(args)]
+
+        # Store as numpy dicts (NOT torch) — much smaller in memory + on disk
+        self.samples = raw  # raw dicts already have numpy arrays from _build_single
+
         if cache_path:
             os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
-            print(f"Saving dataset cache to {cache_path}...")
-            with open(cache_path, "wb") as f:
-                pickle.dump(self.samples, f, protocol=pickle.HIGHEST_PROTOCOL)
-            print(f"Cached {len(self.samples)} samples.")
+            print(f"Saving sharded dataset cache...")
+            _save_sharded_cache(self.samples, cache_path)
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        return self.samples[idx]
+        """Convert numpy → torch lazily on access."""
+        item = self.samples[idx]
+        sample = {
+            "edge_data":  torch.from_numpy(item["edge_data"]),
+            "edge_types": torch.from_numpy(item["edge_types"]),
+            "edge_stats": torch.from_numpy(item["edge_stats"]),
+            "cols": item["cols"], "p": item["p"],
+        }
+        if "adj" in item:
+            sample["adj"]         = torch.from_numpy(item["adj"])
+            sample["edge_labels"] = torch.from_numpy(item["edge_labels"])
+            sample["node_labels"] = torch.from_numpy(item["node_labels"])
+            sample["other_nodes"] = item["other_nodes"]
+        return sample
+
 
 def collate_fn(batch):
     max_E = max(item["edge_data"].shape[0] for item in batch)
@@ -403,24 +548,10 @@ def collate_fn(batch):
     return out
 
 
-# %% [markdown]
-# ### Model Architecture — v5
-#
-# **v5 = v2 baseline + edge-level stat injection + training noise augmentation.**
-#
-# Changes from v2:
-# 1. **Edge statistics** (partial corr, residual asymmetry) are computed as scalars per edge
-#    during preprocessing. A small MLP projects these into d-dim, then they're merged
-#    alongside the edge type embedding: `MergeOperator([conv_emb, type_emb, stat_emb])`.
-# 2. **Gaussian noise** (std=0.01) is added to edge features during training for regularization.
-#
-# The 3-channel conv path is completely unchanged from v2.
-# The merge step goes from 2-input to 3-input (conv + type + stats).
-#
-
-# %%
+# ============================================================
+# Model Architecture
+# ============================================================
 class ConvBlock(nn.Module):
-    """Residual Conv1d + GroupNorm + GELU (Fig. 5 in report)."""
     def __init__(self, d, kernel_size=3, n_groups=8):
         super().__init__()
         self.conv = nn.Conv1d(d, d, kernel_size, padding=kernel_size // 2, bias=False)
@@ -429,8 +560,8 @@ class ConvBlock(nn.Module):
     def forward(self, x):
         return x + self.act(self.norm(self.conv(x)))
 
+
 class MergeOperator(nn.Module):
-    """Concat inputs → Linear → LayerNorm → GELU (Fig. 6 in report)."""
     def __init__(self, n_inputs, d):
         super().__init__()
         self.linear = nn.Linear(n_inputs * d, d)
@@ -439,16 +570,16 @@ class MergeOperator(nn.Module):
     def forward(self, inputs):
         return self.act(self.norm(self.linear(torch.cat(inputs, dim=-1))))
 
+
 class StemLayer(nn.Module):
-    """Linear 3 → d_model applied per-observation."""
     def __init__(self, d):
         super().__init__()
         self.linear = nn.Linear(3, d)
     def forward(self, x):
         return self.linear(x.permute(0, 2, 1)).permute(0, 2, 1)
 
+
 class EdgeFeatureExtractor(nn.Module):
-    """Stem + 5×ConvBlock + AvgPool → 64-dim embedding."""
     def __init__(self, d=64, n_blocks=5):
         super().__init__()
         self.stem = StemLayer(d)
@@ -461,12 +592,7 @@ class EdgeFeatureExtractor(nn.Module):
 
 
 class StatProjector(nn.Module):
-    """
-    Project per-edge scalar statistics into d-dim embedding.
-
-    Takes (partial_corr, residual_asym) per edge → MLP → d-dim.
-    Injected at the merge step alongside conv_emb and type_emb.
-    """
+    """Project per-edge scalar statistics (partial_corr, resid_asym) → d-dim."""
     def __init__(self, n_stats, d):
         super().__init__()
         self.proj = nn.Sequential(
@@ -475,13 +601,11 @@ class StatProjector(nn.Module):
             nn.Linear(d, d),
             nn.LayerNorm(d),
         )
-
     def forward(self, stats):
         return self.proj(stats)
 
 
 class SelfAttentionLayer(nn.Module):
-    """Standard multi-head self-attention + FFN with pre-norm residuals."""
     def __init__(self, d=64, n_heads=4):
         super().__init__()
         self.attn = nn.MultiheadAttention(d, n_heads, batch_first=True)
@@ -497,16 +621,14 @@ class SelfAttentionLayer(nn.Module):
 
 class ADIAModel(nn.Module):
     """
-    v5: Baseline + edge-level stat injection + training noise.
+    v5: v2 baseline + edge-stat injection + training noise.
 
     Pipeline:
-      1. EdgeFeatureExtractor: (B,E,3,N) → (B,E,d)        [unchanged]
-      2. StatProjector: (B,E,2) → (B,E,d)                  [NEW]
-      3. EdgeTypeMerge: [conv_emb, type_emb, stat_emb] → d  [3-input merge]
+      1. EdgeFeatureExtractor: (B,E,3,N) → (B,E,d)
+      2. StatProjector:        (B,E,2) → (B,E,d)        [NEW]
+      3. EdgeMerge:            [conv, type, stat] → (B,E,d)  [3-input]
       4. 2× SelfAttention
       5. Edge head + Node head
-
-    Training augmentation: Gaussian noise on edge features.
     """
     def __init__(self, d=None, n_edge_types=None, n_edge_stats=None,
                  aug_noise_std=0.0):
@@ -521,8 +643,6 @@ class ADIAModel(nn.Module):
         self.extractor = EdgeFeatureExtractor(d)
         self.stat_proj = StatProjector(n_edge_stats, d)
         self.edge_type_emb = nn.Embedding(n_edge_types, d)
-
-        # 3-input merge: conv + type + stats
         self.edge_merge = MergeOperator(n_inputs=3, d=d)
 
         self.attn_layers = nn.ModuleList([SelfAttentionLayer(d) for _ in range(2)])
@@ -533,34 +653,34 @@ class ADIAModel(nn.Module):
     def forward(self, edge_data, edge_types, edge_mask, cols_list, edge_stats=None):
         B, E, C, N = edge_data.shape
 
-        # --- Training augmentation: add Gaussian noise to edge features ---
+        # Training noise augmentation
         if self.training and self.aug_noise_std > 0:
             edge_data = edge_data + torch.randn_like(edge_data) * self.aug_noise_std
 
-        # --- Conv path (unchanged from v2) ---
+        # Conv path
         edge_emb = self.extractor(edge_data.view(B * E, C, N)).view(B, E, self.d)
 
-        # --- Edge type embedding ---
+        # Edge type embedding
         type_emb = self.edge_type_emb(edge_types)
 
-        # --- Stat projection (NEW) ---
+        # Stat projection
         if edge_stats is not None:
             stat_emb = self.stat_proj(edge_stats)
         else:
             stat_emb = torch.zeros_like(edge_emb)
 
-        # --- 3-way merge ---
+        # 3-way merge
         edge_emb = self.edge_merge([edge_emb, type_emb, stat_emb])
 
-        # --- Self-attention ---
+        # Self-attention
         pad_mask = ~edge_mask
         for attn in self.attn_layers:
             edge_emb = attn(edge_emb, key_padding_mask=pad_mask)
 
-        # --- Edge head ---
+        # Edge head
         edge_logits = self.edge_head(edge_emb)
 
-        # --- Node head ---
+        # Node head
         node_logits_list = []
         for b in range(B):
             cols = cols_list[b]
@@ -596,13 +716,9 @@ class ADIAModel(nn.Module):
         return edge_logits, node_logits_list
 
 
-# %% [markdown]
-# ### Training Wrapper
-#
-# Loss = CE(edge classification) + CE(node classification),
-# both weighted by inverse class frequency as described in the report.
-
-# %%
+# ============================================================
+# Training Wrapper
+# ============================================================
 def compute_class_weights(y_list):
     adjacency_label = get_adjacency_label()
     counts = torch.zeros(N_CLASSES)
@@ -611,7 +727,8 @@ def compute_class_weights(y_list):
         arr = y_df.values
         col_idx = {c: i for i, c in enumerate(cols)}
         for v in cols:
-            if v in ("X", "Y"): continue
+            if v in ("X", "Y"):
+                continue
             idx = [col_idx[v], col_idx["X"], col_idx["Y"]]
             sub = arr[np.ix_(idx, idx)]
             key = tuple(sub.flatten())
@@ -619,6 +736,7 @@ def compute_class_weights(y_list):
             counts[CLASS_NAMES.index(label_str)] += 1
     w = 1.0 / (counts + 1e-6)
     return w / w.sum() * N_CLASSES
+
 
 def compute_edge_class_weights(y_list):
     counts = torch.zeros(2)
@@ -631,6 +749,7 @@ def compute_edge_class_weights(y_list):
                     counts[int(arr[i, j])] += 1
     w = 1.0 / (counts + 1e-6)
     return w / w.sum() * 2
+
 
 class ADIAModelWrapper(pl.LightningModule):
     def __init__(self, d=None, node_class_weights=None,
@@ -699,10 +818,9 @@ class ADIAModelWrapper(pl.LightningModule):
         return [opt], [{"scheduler": sched, "interval": "epoch"}]
 
 
-# %% [markdown]
-# ### Inference
-
-# %%
+# ============================================================
+# Inference
+# ============================================================
 @torch.no_grad()
 def infer_single(df, model, device="cpu"):
     model = model.eval()
@@ -747,65 +865,6 @@ def infer_single(df, model, device="cpu"):
                 A.loc[src, dst] = 1
     return A
 
-@torch.no_grad()
-def infer_batch(dfs, model, device="cpu", batch_size=32):
-    model = model.eval()
-    from concurrent.futures import ProcessPoolExecutor
-    import multiprocessing as mp
-    n_workers = max(1, mp.cpu_count() - 1)
-    args = [(df, None) for df in dfs]
-    print(f"Building edge tensors ({len(dfs)} graphs, {n_workers} workers)...")
-    ctx = mp.get_context('fork')
-    with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
-        raw = list(tqdm(pool.map(_build_single, args, chunksize=8), total=len(args)))
-    all_items = [{
-        "edge_data": torch.from_numpy(item["edge_data"]),
-        "edge_types": torch.from_numpy(item["edge_types"]),
-        "edge_stats": torch.from_numpy(item["edge_stats"]),
-        "cols": item["cols"], "p": item["p"],
-    } for item in raw]
-    results = [None] * len(all_items)
-    patterns = {
-        "Confounder":        lambda n: [(n, "X"), (n, "Y")],
-        "Collider":          lambda n: [("X", n), ("Y", n)],
-        "Mediator":          lambda n: [("X", n), (n, "Y")],
-        "Cause of X":        lambda n: [(n, "X")],
-        "Cause of Y":        lambda n: [(n, "Y")],
-        "Consequence of X":  lambda n: [("X", n)],
-        "Consequence of Y":  lambda n: [("Y", n)],
-        "Independent":       lambda n: [],
-    }
-    for start in tqdm(range(0, len(all_items), batch_size), desc="infering batch"):
-        batch_items = all_items[start:start + batch_size]
-        batch = collate_fn(batch_items)
-        edge_logits, node_logits_list = model(
-            batch["edge_data"].to(device), batch["edge_types"].to(device),
-            batch["edge_mask"].to(device), batch["cols"],
-            edge_stats=batch["edge_stats"].to(device),
-        )
-        for b, item in enumerate(batch_items):
-            cols, p, idx = item["cols"], item["p"], start + b
-            edge_probs = torch.softmax(edge_logits[b], dim=-1)[:, 1]
-            E_mat = np.zeros((p, p))
-            count = 0
-            for ii in range(p):
-                for jj in range(p):
-                    if ii != jj:
-                        E_mat[ii, jj] = edge_probs[count].item()
-                        count += 1
-            adj = transform_proba_to_DAG(cols, E_mat).astype(int)
-            A = pd.DataFrame(adj, columns=cols, index=cols)
-            if node_logits_list[b] is not None:
-                other_nodes = [n for n in cols if n not in ("X", "Y")]
-                node_preds = torch.argmax(node_logits_list[b], dim=-1)
-                for k, node_name in enumerate(other_nodes):
-                    pred_class = CLASS_NAMES[node_preds[k].item()]
-                    A.loc[node_name, :] = 0
-                    A.loc[:, node_name] = 0
-                    for (src, dst) in patterns[pred_class](node_name):
-                        A.loc[src, dst] = 1
-            results[idx] = A
-    return results
 
 @torch.no_grad()
 def infer_batch_local(dfs, model, device="cpu", batch_size=32, cache_dir=None):
@@ -814,13 +873,11 @@ def infer_batch_local(dfs, model, device="cpu", batch_size=32, cache_dir=None):
     if cache_dir:
         cache_path = os.path.join(cache_dir, f"infer_edge_tensors_v5_nk{N_KERNEL}.pkl")
     if cache_path and os.path.exists(cache_path):
-        import pickle
         print(f"Loading cached edge tensors from {cache_path}...")
         with open(cache_path, "rb") as f:
             all_items = pickle.load(f)
         print(f"Loaded {len(all_items)} cached edge tensors.")
     else:
-        from concurrent.futures import ProcessPoolExecutor
         import multiprocessing as mp
         n_workers = max(1, mp.cpu_count() - 1)
         args = [(df, None) for df in dfs]
@@ -835,7 +892,6 @@ def infer_batch_local(dfs, model, device="cpu", batch_size=32, cache_dir=None):
             "cols": item["cols"], "p": item["p"],
         } for item in raw]
         if cache_path:
-            import pickle
             os.makedirs(cache_dir, exist_ok=True)
             with open(cache_path, "wb") as f:
                 pickle.dump(all_items, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -883,14 +939,9 @@ def infer_batch_local(dfs, model, device="cpu", batch_size=32, cache_dir=None):
     return results
 
 
-# %% [markdown]
-# ### CrunchDAO Interface — `train` & `infer`
-
-# %%
-# @crunch/keep:on
-MAX_EPOCHS = 30
-LOCAL_CACHE_DIR = "dataset_cache/"
-
+# ============================================================
+# Train & Infer entry points
+# ============================================================
 def train(
     X_train: typing.Dict[str, pd.DataFrame],
     y_train: typing.Dict[str, pd.DataFrame],
@@ -915,19 +966,26 @@ def train(
         torch.save(node_w, node_w_path)
         torch.save(edge_w, edge_w_path)
 
-    dataset_path = os.path.join(LOCAL_CACHE_DIR, f"train_dataset_v5_nk{N_KERNEL}.pkl")
-    dataset = CausalEdgeDataset(X_list, y_list, cache_path=dataset_path, n_workers=40)
+    aug_tag = "xyaug" if N_AUG > 0 else "noaug"
+    dataset_path = os.path.join(
+        LOCAL_CACHE_DIR, f"train_dataset_v5_{aug_tag}_nk{N_KERNEL}.pkl"
+    )
+    dataset = CausalEdgeDataset(
+        X_list, y_list, cache_path=dataset_path, n_workers=47,
+        augment=(N_AUG > 0),
+    )
 
     wrapper = ADIAModelWrapper(
         d=D_MODEL, node_class_weights=node_w,
-        edge_class_weights=edge_w, lr=1e-3, max_epochs=MAX_EPOCHS,
+        edge_class_weights=edge_w, lr=2e-3, max_epochs=MAX_EPOCHS,
         aug_noise_std=AUG_NOISE_STD,
     )
 
     total_params = sum(p.numel() for p in wrapper.model.parameters())
     trainable_params = sum(p.numel() for p in wrapper.model.parameters() if p.requires_grad)
     print(f"Model params: {total_params:,} total, {trainable_params:,} trainable")
-    print(f"Config: stat_injection=ON, aug_noise={AUG_NOISE_STD}")
+    print(f"Config: stat_injection=ON, aug_noise={AUG_NOISE_STD}, "
+          f"xy_remap_aug={'ON' if N_AUG > 0 else 'OFF'} ({len(dataset)} total samples)")
 
     trainer = pl.Trainer(
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
@@ -935,15 +993,16 @@ def train(
         logger=True, enable_checkpointing=True, enable_progress_bar=True,
     )
     loader = DataLoader(
-        dataset, batch_size=16, shuffle=True, drop_last=False,
-        num_workers=10, collate_fn=collate_fn,
+        dataset, batch_size=64, shuffle=True, drop_last=False,
+        num_workers=5, collate_fn=collate_fn,
     )
     print("Starting training...")
     trainer.fit(wrapper, loader)
 
-    path = os.path.join(model_directory_path, "model_v5_augstat.pt")
+    path = os.path.join(model_directory_path, "model.pt")
     torch.save(wrapper.model.state_dict(), path)
     print(f"Model saved to {path}")
+
 
 def infer(
     X_test: typing.Dict[str, pd.DataFrame],
@@ -951,9 +1010,9 @@ def infer(
     id_column_name: str,
     prediction_column_name: str,
 ) -> pd.DataFrame:
-    path = os.path.join(model_directory_path, "model_v5_augstat.pt")
+    path = os.path.join(model_directory_path, "model.pt")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = ADIAModel(d=D_MODEL, aug_noise_std=0.0)  # no noise at inference
+    model = ADIAModel(d=D_MODEL, aug_noise_std=0.0)
     model.load_state_dict(torch.load(path, map_location=device, weights_only=True))
     model.to(device).eval()
 
@@ -961,8 +1020,8 @@ def infer(
     dfs = [X_test[n] for n in names]
 
     print(f"Batch inference on {len(dfs)} samples (device={device})...")
-    adj_list = infer_batch_local(dfs, model, device=device, batch_size=128,
-                           cache_dir=LOCAL_CACHE_DIR)
+    adj_list = infer_batch_local(dfs, model, device=device, batch_size=64,
+                                 cache_dir=LOCAL_CACHE_DIR)
 
     submission = {}
     for name, A in zip(names, adj_list):
@@ -976,26 +1035,51 @@ def infer(
     return s
 
 
-# %% [markdown]
-# ### Local Training & Evaluation
+# ============================================================
+# Main
+# ============================================================
+if __name__ == "__main__":
+    X_train = pd.read_pickle("data/X_train.pickle")
+    y_train = pd.read_pickle("data/y_train.pickle")
+    print(f"Loaded {len(X_train)} training samples.")
 
-# %%
+    train(X_train, y_train, model_directory_path="resources")
 
+    # Local evaluation
+    X_test = pd.read_pickle("data/X_test_reduced.pickle")
+    y_test = pd.read_pickle("data/y_test_reduced.pickle")
 
-# %% [markdown]
-# ### CrunchDAO Test & Submit
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = ADIAModel(d=D_MODEL, aug_noise_std=0.0)
+    model.load_state_dict(torch.load("resources/model.pt", map_location=device, weights_only=True))
+    model.to(device).eval()
 
-# # %%
-# X_train = pd.read_pickle("data/X_train.pickle")
-# y_train = pd.read_pickle("data/y_train.pickle")
-# print(f"Loaded {len(X_train)} training samples.")
+    names = list(X_test.keys())
+    dfs = [X_test[n] for n in names]
+    adj_list = infer_batch_local(dfs, model, device=device, batch_size=64,
+                                 cache_dir=LOCAL_CACHE_DIR)
 
-# # %%
-# train(X_train, y_train, model_directory_path="resources")
+    # Evaluate
+    adjacency_label = get_adjacency_label()
+    class_correct = {c: 0 for c in CLASS_NAMES}
+    class_total = {c: 0 for c in CLASS_NAMES}
 
-X_test = pd.read_pickle("data/X_test_reduced.pickle")
-y_pred = infer(X_test, model_directory_path="resources",
-              id_column_name="example_id", prediction_column_name="prediction")
-y_pred.to_parquet("prediction/v5.parquet")
+    for name, A_pred in zip(names, adj_list):
+        y_df = y_test[name]
+        pred_labels = get_labels(A_pred, adjacency_label)
+        true_labels = get_labels(y_df, adjacency_label)
+        for v in true_labels:
+            true_cls = true_labels[v]
+            pred_cls = pred_labels.get(v, "Independent")
+            class_total[true_cls] += 1
+            if pred_cls == true_cls:
+                class_correct[true_cls] += 1
 
-# crunch.test(no_determinism_check=True)
+    print("\nPer-class accuracy:")
+    accs = []
+    for cls in CLASS_NAMES:
+        n = class_total[cls]
+        acc = class_correct[cls] / n if n > 0 else 0.0
+        accs.append(acc)
+        print(f"  {cls:25s}: {acc:.4f}  (n={n})")
+    print(f"\nBalanced Accuracy: {np.mean(accs):.4f}")

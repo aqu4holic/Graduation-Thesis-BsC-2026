@@ -957,23 +957,33 @@ def infer(
     model.load_state_dict(torch.load(path, map_location=device, weights_only=True))
     model.to(device).eval()
 
-    names = list(X_test.keys())
+    y_test = pd.read_pickle("data/y_test_reduced.pickle")
+    names = list(X_test.keys())[:10]
     dfs = [X_test[n] for n in names]
+    adj_list = infer_batch_local(dfs, model, device=device, batch_size=10, cache_dir=None)  # no cache!
 
-    print(f"Batch inference on {len(dfs)} samples (device={device})...")
-    adj_list = infer_batch_local(dfs, model, device=device, batch_size=128,
-                           cache_dir=LOCAL_CACHE_DIR)
+    adjacency_label = get_adjacency_label()
+    for name, A_pred in zip(names, adj_list):
+        y_df = y_test[name]
+        pred_labels = get_labels(A_pred, adjacency_label)
+        true_labels = get_labels(y_df, adjacency_label)
+        for v in true_labels:
+            print(f"  {name}/{v}: true={true_labels[v]:20s} pred={pred_labels.get(v, '???')}")
 
-    submission = {}
-    for name, A in zip(names, adj_list):
-        nodes = list(A.columns)
-        for i in nodes:
-            for j in nodes:
-                submission[f"{name}_{i}_{j}"] = int(A.loc[i, j])
+    # print(f"Batch inference on {len(dfs)} samples (device={device})...")
+    # adj_list = infer_batch_local(dfs, model, device=device, batch_size=64,
+    #                        cache_dir=LOCAL_CACHE_DIR)
 
-    s = pd.Series(submission).reset_index()
-    s.columns = [id_column_name, prediction_column_name]
-    return s
+    # submission = {}
+    # for name, A in zip(names, adj_list):
+    #     nodes = list(A.columns)
+    #     for i in nodes:
+    #         for j in nodes:
+    #             submission[f"{name}_{i}_{j}"] = int(A.loc[i, j])
+
+    # s = pd.Series(submission).reset_index()
+    # s.columns = [id_column_name, prediction_column_name]
+    # return s
 
 
 # %% [markdown]
@@ -996,6 +1006,6 @@ def infer(
 X_test = pd.read_pickle("data/X_test_reduced.pickle")
 y_pred = infer(X_test, model_directory_path="resources",
               id_column_name="example_id", prediction_column_name="prediction")
-y_pred.to_parquet("prediction/v5.parquet")
+# y_pred.to_parquet("prediction/v5.parquet")
 
 # crunch.test(no_determinism_check=True)

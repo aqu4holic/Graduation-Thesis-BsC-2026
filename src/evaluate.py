@@ -1,3 +1,4 @@
+# %%
 """
 Parallelized local evaluation — node-level balanced accuracy.
 """
@@ -9,9 +10,11 @@ from tqdm.auto import tqdm
 import networkx as nx
 
 
+# %%
 # --- Graph utilities (must be top-level for pickling) ---
 def graph_nodes_representation(graph, nodelist):
-    return tuple(nx.adjacency_matrix(graph, nodelist=nodelist).todense().flatten())
+    arr = np.asarray(nx.adjacency_matrix(graph, nodelist=nodelist).todense())
+    return tuple(int(x) for x in arr.flatten())
 
 
 def create_graph_label():
@@ -37,59 +40,49 @@ def get_labels(adj_df, adjacency_label):
     result = {}
     for v in adj_df.columns.drop(["X", "Y"]):
         sub = adj_df.loc[[v, "X", "Y"], [v, "X", "Y"]]
-        key = tuple(sub.values.flatten())
-        result[v] = adjacency_label[key]
+        key = tuple(int(x) for x in sub.values.flatten())
+        result[v] = adjacency_label.get(key, "Independent")
     return result
 
 
 def _eval_single(args):
-    """Process one graph: reconstruct adj from flat predictions, extract labels."""
-    name, nodes, pred_lookup, true_lookup, adjacency_label = args
+    name, nodes, pred_lookup, true_adj_np, adjacency_label = args
     p = len(nodes)
 
-    pred_labels, true_labels = [], []
-    for source, lookup in [("pred", pred_lookup), ("true", true_lookup)]:
-        adj = np.zeros((p, p), dtype=int)
-        for i, ni in enumerate(nodes):
-            for j, nj in enumerate(nodes):
-                adj[i, j] = lookup.get(f"{name}_{ni}_{nj}", 0)
-        A = pd.DataFrame(adj, columns=nodes, index=nodes)
-        labels = get_labels(A, adjacency_label)
-        if source == "pred":
-            pred_labels.extend(labels.values())
-        else:
-            true_labels.extend(labels.values())
+    # Ground truth: directly from y_test adjacency matrix
+    A_true = pd.DataFrame(true_adj_np, columns=nodes, index=nodes)
+    true_labels = get_labels(A_true, adjacency_label)
 
-    return pred_labels, true_labels
+    # Prediction: reconstruct from flat parquet
+    adj = np.zeros((p, p), dtype=int)
+    for i, ni in enumerate(nodes):
+        for j, nj in enumerate(nodes):
+            adj[i, j] = int(pred_lookup.get(f"{name}_{ni}_{nj}", 0))
+    A_pred = pd.DataFrame(adj, columns=nodes, index=nodes)
+    pred_labels = get_labels(A_pred, adjacency_label)
+
+    return list(pred_labels.values()), list(true_labels.values())
 
 
-def evaluate_predictions(X_test, y_pred_path, y_true_path, n_workers=None):
+def evaluate_predictions(X_test, y_test, y_pred_path, n_workers=None):
     """
-    Parallel evaluation of predictions vs ground truth.
-
     Args:
-        X_test: dict of {name: DataFrame} — just need column names
+        X_test: dict {name: DataFrame} — for column names
+        y_test: dict {name: DataFrame} — ground truth adjacency matrices
         y_pred_path: path to prediction parquet
-        y_true_path: path to ground truth parquet
-        n_workers: number of processes (default: cpu_count - 1)
     """
     import multiprocessing as mp
     if n_workers is None:
         n_workers = max(1, mp.cpu_count() - 1)
 
-    # Load and index predictions
     y_pred_df = pd.read_parquet(y_pred_path)
-    y_true_df = pd.read_parquet(y_true_path)
-
-    # Build fast lookup dicts (id -> prediction value)
     pred_lookup = dict(zip(y_pred_df.iloc[:, 0], y_pred_df["prediction"]))
-    true_lookup = dict(zip(y_true_df.iloc[:, 0], y_true_df["prediction"]))
 
     _, adjacency_label = create_graph_label()
 
-    # Build args
     args = [
-        (name, list(X_test[name].columns), pred_lookup, true_lookup, adjacency_label)
+        (name, list(X_test[name].columns), pred_lookup,
+         y_test[name].values.astype(int), adjacency_label)
         for name in X_test.keys()
     ]
 
@@ -111,9 +104,7 @@ def evaluate_predictions(X_test, y_pred_path, y_true_path, n_workers=None):
 
     score = balanced_accuracy_score(all_true, all_pred)
 
-    # Per-class breakdown
-    y_pred_s = pd.Series(all_pred)
-    y_true_s = pd.Series(all_true)
+    y_pred_s, y_true_s = pd.Series(all_pred), pd.Series(all_true)
     print("\nPer-class accuracy:")
     for label in sorted(y_true_s.unique()):
         mask = y_true_s == label
@@ -124,14 +115,21 @@ def evaluate_predictions(X_test, y_pred_path, y_true_path, n_workers=None):
     return score
 
 
-if __name__ == "__main__":
-    # --- Usage ---
-    import crunch
-    crunch = crunch.load_notebook()
-    X_train, y_train, X_test = crunch.load_data()
+# %%
+# --- Usage ---
+X_test = pd.read_pickle("data/X_test_reduced.pickle")
+y_test = pd.read_pickle("data/y_test_reduced.pickle")
 
-    score = evaluate_predictions(
-        X_test,
-        y_pred_path="prediction/prediction_20_b16_lr1e3.parquet",
-        y_true_path="data/example_prediction_reduced.parquet",
-    )
+# # %%
+# X_train = pd.read_pickle("data/X_train.pickle")
+# len(X_train)
+
+# # %%
+# len(X_train), len(X_test)
+
+# %%
+score = evaluate_predictions(
+    X_test,
+    y_test,
+    y_pred_path="prediction/v5.parquet",
+)
