@@ -9,7 +9,6 @@ from concurrent.futures import ProcessPoolExecutor
 from tqdm.auto import tqdm
 import networkx as nx
 
-
 # %%
 # --- Graph utilities (must be top-level for pickling) ---
 def graph_nodes_representation(graph, nodelist):
