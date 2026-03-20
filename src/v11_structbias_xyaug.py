@@ -1,31 +1,32 @@
 """
-v8b_anm_xyaug.py — ADIA Causal Discovery
-  Multi-bandwidth kernel regression (5ch) + ANM multivariate residuals (3ch)
-  = 8 input channels per edge
-  + XY remap augmentation (~11x), shard-based training
+v11_structbias_xyaug.py — ADIA Causal Discovery
+  v8b (8ch multibw + ANM) + Graph-Structural Attention Bias + XY aug
 
-Channels per edge (u→v):
-  Ch 0:  sorted u observations
-  Ch 1:  v observations sorted by u
-  Ch 2:  kernel regression coeff at bandwidth=0.2
-  Ch 3:  kernel regression coeff at bandwidth=0.5
-  Ch 4:  kernel regression coeff at bandwidth=1.0
-  Ch 5:  ANM multivariate residual (v - ŷ_v) at bandwidth=0.2, sorted by u
-  Ch 6:  ANM multivariate residual (v - ŷ_v) at bandwidth=0.5, sorted by u
-  Ch 7:  ANM multivariate residual (v - ŷ_v) at bandwidth=1.0, sorted by u
+Architecture change from v8b: SelfAttention → StructuralSelfAttention.
+Adds learned bias to attention scores based on edge-pair topology:
+  Type 0: Reverse pair (u1=v2 AND v1=u2)
+  Type 1: Shared source (u1=u2)
+  Type 2: Shared target (v1=v2)
+  Type 3: Forward chain (v1=u2)
+  Type 4: Backward chain (u1=v2)
+  Type 5: Unrelated
 
-Architecture: v2 baseline with N_CHANNELS=8, no StatProjector, no focal loss.
-Training: XY aug ~263K samples, sharded, bs=16, lr=1e-3, 30 epochs, 2 GPU DDP.
+v11 base achieved 79.59% vs v8b base 76.94% (+2.65%).
+This version adds XY aug on top. Reuses v8b shard data.
 
 Usage:
-    python v8b_anm_xyaug.py
+    python v11_structbias_xyaug.py
 """
 
 # @crunch/keep:on
 import crunch
 
-import typing
 import os
+# os.environ["OPENBLAS_NUM_THREADS"] = "1"
+# os.environ["MKL_NUM_THREADS"] = "1"
+# os.environ["OMP_NUM_THREADS"] = "1"
+
+import typing
 import glob
 import gc
 from tqdm.auto import tqdm
@@ -39,6 +40,8 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 import torch.nn.functional as F
 
 import pytorch_lightning as pl
+import torch.autograd.graph
+torch.autograd.graph.set_warn_on_accumulate_grad_stream_mismatch(False)
 
 import networkx as nx
 from sklearn.model_selection import train_test_split
@@ -54,6 +57,8 @@ N_KERNEL: int = 1000
 N_CLASSES: int = 8
 N_EDGE_TYPES: int = 7
 D_MODEL: int = 64
+N_HEADS: int = 4
+N_STRUCT_TYPES: int = 6
 CLASS_NAMES: list[str] = [
     "Confounder", "Collider", "Mediator",
     "Cause of X", "Cause of Y",
@@ -76,6 +81,7 @@ N_AUG: int = 1
 LOCAL_CACHE_DIR: str = "dataset_cache/"
 IS_CLOUD_SUBMIT: bool = False
 SHARD_SIZE: int = 50_000
+# Reuse v8b shards — same preprocessing, different model
 SHARD_DIR: str = os.path.join(LOCAL_CACHE_DIR, f"train_v8b_anm_xyaug_nk{N_KERNEL}_shards")
 
 
@@ -655,6 +661,45 @@ class InMemoryDataset(Dataset):
         return result
 
 
+# ============================================================
+# Structural Relationship Matrix
+# ============================================================
+def build_struct_rel_matrix(p: int) -> np.ndarray:
+    """Build E×E matrix of structural relationship types for a p-node graph.
+    Types: 0=reverse, 1=shared_source, 2=shared_target, 3=fwd_chain, 4=bwd_chain, 5=unrelated
+    """
+    E: int = p * (p - 1)
+    edge_uv: list[tuple[int, int]] = []
+    for u in range(p):
+        for v in range(p):
+            if u != v:
+                edge_uv.append((u, v))
+    rel: np.ndarray = np.full((E, E), 5, dtype=np.int64)
+    for e1 in range(E):
+        u1, v1 = edge_uv[e1]
+        for e2 in range(E):
+            u2, v2 = edge_uv[e2]
+            if u1 == v2 and v1 == u2:
+                rel[e1, e2] = 0
+            elif u1 == u2:
+                rel[e1, e2] = 1
+            elif v1 == v2:
+                rel[e1, e2] = 2
+            elif v1 == u2:
+                rel[e1, e2] = 3
+            elif u1 == v2:
+                rel[e1, e2] = 4
+    return rel
+
+_STRUCT_REL_CACHE: dict[int, np.ndarray] = {}
+
+def get_struct_rel_matrix(p: int) -> np.ndarray:
+    global _STRUCT_REL_CACHE
+    if p not in _STRUCT_REL_CACHE:
+        _STRUCT_REL_CACHE[p] = build_struct_rel_matrix(p)
+    return _STRUCT_REL_CACHE[p]
+
+
 def collate_fn(batch: list[dict]) -> dict:
     max_E: int = max(item["edge_data"].shape[0] for item in batch)
     B: int = len(batch)
@@ -662,6 +707,7 @@ def collate_fn(batch: list[dict]) -> dict:
     edge_data: torch.Tensor = torch.zeros(B, max_E, N_CHANNELS, N_OBS)
     edge_types: torch.Tensor = torch.zeros(B, max_E, dtype=torch.long)
     edge_mask: torch.Tensor = torch.zeros(B, max_E, dtype=torch.bool)
+    struct_rel: torch.Tensor = torch.full((B, max_E, max_E), 5, dtype=torch.long)
 
     max_K: int = max(
         (item["node_labels"].shape[0] if "node_labels" in item else 0)
@@ -680,6 +726,11 @@ def collate_fn(batch: list[dict]) -> dict:
         edge_types[b, :E] = item["edge_types"]
         edge_mask[b, :E] = True
         cols_list.append(item["cols"])
+
+        p: int = item["p"]
+        rel_mat: np.ndarray = get_struct_rel_matrix(p)
+        struct_rel[b, :E, :E] = torch.from_numpy(rel_mat)
+
         if "edge_labels" in item:
             has_labels = True
             edge_labels[b, :E] = item["edge_labels"]
@@ -691,6 +742,7 @@ def collate_fn(batch: list[dict]) -> dict:
         "edge_data": edge_data,
         "edge_types": edge_types,
         "edge_mask": edge_mask,
+        "struct_rel": struct_rel,
         "cols": cols_list,
     }
     if has_labels:
@@ -748,20 +800,45 @@ class EdgeFeatureExtractor(nn.Module):
         return self.pool(x).squeeze(-1)
 
 
-class SelfAttentionLayer(nn.Module):
-    def __init__(self, d: int = 64, n_heads: int = 4):
+class StructuralSelfAttention(nn.Module):
+    """Self-attention with graph-structural bias.
+    Learned scalar bias per head for each of 6 structural relationship types.
+    """
+    def __init__(self, d: int = 64, n_heads: int = 4, n_struct_types: int = 6):
         super().__init__()
-        self.attn = nn.MultiheadAttention(d, n_heads, batch_first=True)
+        self.d: int = d
+        self.n_heads: int = n_heads
+        self.head_dim: int = d // n_heads
+        self.q_proj = nn.Linear(d, d)
+        self.k_proj = nn.Linear(d, d)
+        self.v_proj = nn.Linear(d, d)
+        self.out_proj = nn.Linear(d, d)
+        self.struct_bias = nn.Embedding(n_struct_types, n_heads)
+        nn.init.zeros_(self.struct_bias.weight)
         self.norm1 = nn.LayerNorm(d)
-        self.ff = nn.Sequential(
-            nn.Linear(d, 4 * d), nn.GELU(), nn.Linear(4 * d, d)
-        )
+        self.ff = nn.Sequential(nn.Linear(d, 4 * d), nn.GELU(), nn.Linear(4 * d, d))
         self.norm2 = nn.LayerNorm(d)
+        self.scale: float = self.head_dim ** -0.5
 
     def forward(
-        self, x: torch.Tensor, key_padding_mask: torch.Tensor | None = None
+        self, x: torch.Tensor, struct_rel: torch.Tensor,
+        key_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        attn_out, _ = self.attn(x, x, x, key_padding_mask=key_padding_mask)
+        B, E, _ = x.shape
+        Q = self.q_proj(x).view(B, E, self.n_heads, self.head_dim).transpose(1, 2)
+        K = self.k_proj(x).view(B, E, self.n_heads, self.head_dim).transpose(1, 2)
+        V = self.v_proj(x).view(B, E, self.n_heads, self.head_dim).transpose(1, 2)
+        attn_scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
+        bias = self.struct_bias(struct_rel).permute(0, 3, 1, 2)
+        attn_scores = attn_scores + bias
+        if key_padding_mask is not None:
+            mask_expanded = key_padding_mask.unsqueeze(1).unsqueeze(2)
+            attn_scores = attn_scores.masked_fill(mask_expanded, float('-inf'))
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_weights = torch.nan_to_num(attn_weights, nan=0.0)
+        attn_out = torch.matmul(attn_weights, V)
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, E, self.d)
+        attn_out = self.out_proj(attn_out)
         x = self.norm1(x + attn_out)
         x = self.norm2(x + self.ff(x))
         return x
@@ -769,7 +846,7 @@ class SelfAttentionLayer(nn.Module):
 
 class ADIAModel(nn.Module):
     """
-    v8b: v2 baseline architecture with 8-channel input (multibw + ANM).
+    v11: v8b + graph-structural attention bias.
     """
 
     def __init__(
@@ -786,7 +863,8 @@ class ADIAModel(nn.Module):
         self.edge_type_emb = nn.Embedding(n_edge_types, d)
         self.edge_merge = MergeOperator(n_inputs=2, d=d)
         self.attn_layers = nn.ModuleList(
-            [SelfAttentionLayer(d) for _ in range(2)]
+            [StructuralSelfAttention(d, n_heads=N_HEADS, n_struct_types=N_STRUCT_TYPES)
+             for _ in range(2)]
         )
         self.edge_head = nn.Linear(d, 2)
         self.node_merge = MergeOperator(n_inputs=4, d=d)
@@ -798,6 +876,7 @@ class ADIAModel(nn.Module):
         edge_types: torch.Tensor,
         edge_mask: torch.Tensor,
         cols_list: list[list[str]],
+        struct_rel: torch.Tensor = None,
     ) -> tuple:
         B: int
         E: int
@@ -813,9 +892,18 @@ class ADIAModel(nn.Module):
         type_emb: torch.Tensor = self.edge_type_emb(edge_types)
         edge_emb: torch.Tensor = self.edge_merge([conv_emb, type_emb])
 
+        # Build struct_rel on the fly if not provided
+        if struct_rel is None:
+            struct_rel = torch.full((B, E, E), 5, dtype=torch.long, device=edge_data.device)
+            for b in range(B):
+                p: int = len(cols_list[b])
+                e: int = p * (p - 1)
+                rel = get_struct_rel_matrix(p)
+                struct_rel[b, :e, :e] = torch.from_numpy(rel).to(edge_data.device)
+
         inv_mask: torch.Tensor = ~edge_mask
         for layer in self.attn_layers:
-            edge_emb = layer(edge_emb, key_padding_mask=inv_mask)
+            edge_emb = layer(edge_emb, struct_rel, key_padding_mask=inv_mask)
 
         edge_logits: torch.Tensor = self.edge_head(edge_emb)
 
@@ -918,6 +1006,7 @@ class ADIAModelWrapper(pl.LightningModule):
             batch["edge_types"].to(self.device),
             batch["edge_mask"].to(self.device),
             batch["cols"],
+            struct_rel=batch["struct_rel"].to(self.device),
         )
 
     def _compute_loss(self, batch: dict, split: str) -> torch.Tensor:
@@ -1020,7 +1109,7 @@ def train(
     sampler = ShardGroupedSampler(dataset.shard_sizes)
     loader = DataLoader(
         dataset, batch_size=BATCH_SIZE, sampler=sampler,
-        num_workers=0, collate_fn=collate_fn, pin_memory=True,
+        num_workers=2, collate_fn=collate_fn, pin_memory=True,
     )
     print(f"Dataset: {len(dataset)} samples ({dataset.n_shards} shards)")
 
@@ -1087,7 +1176,8 @@ def infer_batch_local(dfs, model, device="cpu", batch_size=32, cache_dir=None):
     for batch in tqdm(loader, desc="infering"):
         edge_logits, node_logits_list = model(
             batch["edge_data"].to(device), batch["edge_types"].to(device),
-            batch["edge_mask"].to(device), batch["cols"])
+            batch["edge_mask"].to(device), batch["cols"],
+            struct_rel=batch["struct_rel"].to(device))
         for b in range(edge_logits.shape[0]):
             item = all_items[idx_off + b]
             cols, p = item["cols"], item["p"]
@@ -1115,7 +1205,7 @@ def infer_batch_local(dfs, model, device="cpu", batch_size=32, cache_dir=None):
 
 
 def infer(X_test, model_directory_path, id_column_name, prediction_column_name):
-    path = os.path.join(model_directory_path, "model_v8b_anm_xyaug.pt")
+    path = os.path.join(model_directory_path, "model.pt")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = ADIAModel(d=D_MODEL, aug_noise_std=0.0)
     model.load_state_dict(torch.load(path, map_location=device, weights_only=True))
@@ -1138,8 +1228,7 @@ def infer(X_test, model_directory_path, id_column_name, prediction_column_name):
 # ============================================================
 if __name__ == "__main__":
     print("=" * 60)
-    print("v8b_anm_xyaug: Multi-bandwidth + ANM residuals + XY aug")
-    print(f"Dimension: {D_MODEL}")
+    print("v11 Structural Attention Bias + XY aug")
     print(f"Channels: {N_CHANNELS} (2 sorted + {len(BANDWIDTHS)} kernel + {len(BANDWIDTHS)} ANM)")
     print(f"Config: bs={BATCH_SIZE}, lr={LR}, epochs={MAX_EPOCHS}")
     print(f"Shard dir: {SHARD_DIR}")
@@ -1182,6 +1271,3 @@ if __name__ == "__main__":
         accs.append(acc)
         print(f"  {cls:25s}: {acc:.4f}  (n={n})")
     print(f"\nBalanced Accuracy: {np.mean(accs):.4f}")
-
-    # y_pred = infer(X_test, "resources", "example_id", "prediction")
-    # print(len(y_pred))
