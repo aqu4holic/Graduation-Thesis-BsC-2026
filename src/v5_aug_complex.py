@@ -743,16 +743,16 @@ def infer(X_test, model_directory_path, id_column_name, prediction_column_name):
 # Main
 # ============================================================
 if __name__ == "__main__":
-    X_train = pd.read_pickle("data/X_train.pickle")
-    y_train = pd.read_pickle("data/y_train.pickle")
-    print(f"Loaded {len(X_train)} training samples.")
-    train(X_train, y_train, model_directory_path="resources")
+    # X_train = pd.read_pickle("data/X_train.pickle")
+    # y_train = pd.read_pickle("data/y_train.pickle")
+    # print(f"Loaded {len(X_train)} training samples.")
+    # train(X_train, y_train, model_directory_path="resources")
 
     X_test = pd.read_pickle("data/X_test_reduced.pickle")
-    y_test = pd.read_pickle("data/y_test.pickle")
+    y_test = pd.read_pickle("data/y_test_reduced.pickle")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = ADIAModel(d=D_MODEL, aug_noise_std=0.0)
-    model.load_state_dict(torch.load("resources/model.pt", map_location=device, weights_only=True))
+    model.load_state_dict(torch.load("resources/model_v5_xyaug.pt", map_location=device, weights_only=True))
     model.to(device).eval()
     dfs = [X_test[n] for n in X_test]; names = list(X_test.keys())
     adj_list = infer_batch_local(dfs, model, device=device, batch_size=64, cache_dir=LOCAL_CACHE_DIR)

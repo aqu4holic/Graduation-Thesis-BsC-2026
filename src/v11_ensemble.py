@@ -1,21 +1,13 @@
 """
-v11_structbias_xyaug.py — ADIA Causal Discovery
-  v8b (8ch multibw + ANM) + Graph-Structural Attention Bias + XY aug
+v11_ensemble.py — ADIA Causal Discovery
+  v11 Structural Attention Bias — 3-Seed Ensemble
 
-Architecture change from v8b: SelfAttention → StructuralSelfAttention.
-Adds learned bias to attention scores based on edge-pair topology:
-  Type 0: Reverse pair (u1=v2 AND v1=u2)
-  Type 1: Shared source (u1=u2)
-  Type 2: Shared target (v1=v2)
-  Type 3: Forward chain (v1=u2)
-  Type 4: Backward chain (u1=v2)
-  Type 5: Unrelated
-
-v11 base achieved 79.59% vs v8b base 76.94% (+2.65%).
-This version adds XY aug on top. Reuses v8b shard data.
+Trains 3 models with different random seeds (42, 123, 777) on base 23.5K.
+At inference, averages softmax probabilities across all 3 models before argmax.
+Reduces variance, stabilizes predictions for private leaderboard.
 
 Usage:
-    python v11_structbias_xyaug.py
+    python v11_ensemble.py
 """
 
 # @crunch/keep:on
@@ -27,7 +19,6 @@ import os
 # os.environ["OMP_NUM_THREADS"] = "1"
 
 import typing
-import glob
 import gc
 from tqdm.auto import tqdm
 
@@ -36,7 +27,7 @@ import numpy as np
 
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, Dataset, Sampler
+from torch.utils.data import DataLoader, Dataset
 import torch.nn.functional as F
 
 import pytorch_lightning as pl
@@ -44,7 +35,6 @@ import torch.autograd.graph
 torch.autograd.graph.set_warn_on_accumulate_grad_stream_mismatch(False)
 
 import networkx as nx
-from sklearn.model_selection import train_test_split
 
 import pickle
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -52,13 +42,14 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 # ============================================================
 # Configuration
 # ============================================================
+SEEDS: list[int] = [1802, 2205, 1509]
 N_OBS: int = 1000
 N_KERNEL: int = 1000
 N_CLASSES: int = 8
 N_EDGE_TYPES: int = 7
 D_MODEL: int = 64
 N_HEADS: int = 4
-N_STRUCT_TYPES: int = 6
+N_STRUCT_TYPES: int = 6  # structural relationship types
 CLASS_NAMES: list[str] = [
     "Confounder", "Collider", "Mediator",
     "Cause of X", "Cause of Y",
@@ -66,27 +57,19 @@ CLASS_NAMES: list[str] = [
     "Independent",
 ]
 
-# === Multi-bandwidth config ===
 BANDWIDTHS: list[float] = [0.2, 0.5, 1.0]
+N_CHANNELS: int = 2 + len(BANDWIDTHS) + len(BANDWIDTHS)  # 8
 
-# Total channels: 2 (sorted obs) + 3 (kernel bw) + 3 (ANM resid bw) = 8
-N_CHANNELS: int = 2 + len(BANDWIDTHS) + len(BANDWIDTHS)
-
-# === Training config ===
-MAX_EPOCHS: int = 10
-BATCH_SIZE: int = 64
-LR: float = 2e-3
+MAX_EPOCHS: int = 30
+BATCH_SIZE: int = 16
+LR: float = 1e-3
 AUG_NOISE_STD: float = 0.01
-N_AUG: int = 1
 LOCAL_CACHE_DIR: str = "dataset_cache/"
 IS_CLOUD_SUBMIT: bool = False
-SHARD_SIZE: int = 50_000
-# Reuse v8b shards — same preprocessing, different model
-SHARD_DIR: str = os.path.join(LOCAL_CACHE_DIR, f"train_v8b_anm_xyaug_nk{N_KERNEL}_shards")
 
 
 # ============================================================
-# Graph Utilities (unchanged)
+# Graph Utilities
 # ============================================================
 def graph_nodes_representation(
     graph: nx.DiGraph, nodelist: list[str]
@@ -160,10 +143,9 @@ def transform_proba_to_DAG(
 
 
 # ============================================================
-# Data Preprocessing
+# Data Preprocessing (identical to v8b)
 # ============================================================
 def _edge_type(u_name: str, v_name: str) -> int:
-    """Edge type encoding (7 types)."""
     uX: bool = u_name == "X"
     uY: bool = u_name == "Y"
     vX: bool = v_name == "X"
@@ -180,15 +162,6 @@ def _edge_type(u_name: str, v_name: str) -> int:
 def compute_multivariate_kernel_coefficients(
     data: np.ndarray, sub_idx: np.ndarray, bandwidth: float = 0.5,
 ) -> tuple[dict[tuple[int, int], np.ndarray], dict[int, np.ndarray]]:
-    """
-    Multivariate kernel regression for ALL target variables at once.
-    Uses pre-selected subsample indices for consistency across bandwidths.
-
-    Returns:
-        coeff_map: dict mapping (k, j) -> np.ndarray of shape (N,)
-        resid_map: dict mapping j -> np.ndarray of shape (N,)
-            residual[i] = x_j[i] - ŷ_j(i)  where ŷ uses all other variables
-    """
     N: int
     p: int
     N, p = data.shape
@@ -227,18 +200,14 @@ def compute_multivariate_kernel_coefficients(
 
     for j in range(p):
         c_all, other_cols = all_coeffs[j]
-
-        # Extract per-predictor coefficients (for conv channels)
         for idx_in_other, k in enumerate(other_cols):
             coeff_sub: np.ndarray = c_all[:, idx_in_other + 1]
             coeff_map[(k, j)] = coeff_sub[nearest].astype(np.float32)
-
-        # Compute residuals: x_j - ŷ_j using NN-interpolated coefficients
-        c_nn: np.ndarray = c_all[nearest]  # (N, p) — all coeffs for target j
+        c_nn: np.ndarray = c_all[nearest]
         X_full: np.ndarray = np.concatenate(
             [np.ones((N, 1)), data[:, other_cols]], axis=1
-        )  # (N, p)
-        y_hat: np.ndarray = np.sum(c_nn * X_full, axis=1)  # (N,)
+        )
+        y_hat: np.ndarray = np.sum(c_nn * X_full, axis=1)
         resid_map[j] = (data[:, j] - y_hat).astype(np.float32)
 
     return coeff_map, resid_map
@@ -247,9 +216,6 @@ def compute_multivariate_kernel_coefficients(
 def build_edge_tensor(
     df: pd.DataFrame,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Build 8-channel edge tensor: multi-bandwidth kernel + ANM residuals.
-    """
     cols: list[str] = list(df.columns)
     p: int = len(cols)
     data: np.ndarray = df.values.astype(np.float32)
@@ -277,23 +243,19 @@ def build_edge_tensor(
         for j, v_name in enumerate(cols):
             if i == j:
                 continue
-
             v_sorted_by_u: np.ndarray = data[sort_idx, j]
-
             kernel_channels: list[np.ndarray] = [
                 cm[(i, j)][sort_idx] for cm in coeff_maps
             ]
-
             anm_channels: list[np.ndarray] = [
                 rm[j][sort_idx] for rm in resid_maps
             ]
-
             channels: list[np.ndarray] = (
                 [u_sorted, v_sorted_by_u]
                 + kernel_channels
                 + anm_channels
             )
-            edge_tensor: np.ndarray = np.stack(channels, axis=0)  # (8, N)
+            edge_tensor: np.ndarray = np.stack(channels, axis=0)
             edges.append(edge_tensor)
             edge_types.append(_edge_type(u_name, v_name))
 
@@ -303,10 +265,70 @@ def build_edge_tensor(
 
 
 # ============================================================
-# Sample Builders
+# Structural Relationship Matrix
+# ============================================================
+def build_struct_rel_matrix(p: int) -> np.ndarray:
+    """Build E×E matrix of structural relationship types for a p-node graph.
+
+    Edge ordering: for u in range(p), for v in range(p), if u!=v.
+    Edge index: u*(p-1) + v - (1 if v > u else 0)
+
+    Types:
+      0: Reverse pair     (u1=v2 AND v1=u2)
+      1: Shared source    (u1=u2, not reverse)
+      2: Shared target    (v1=v2, not reverse)
+      3: Forward chain    (v1=u2, not reverse)
+      4: Backward chain   (u1=v2, not reverse)
+      5: Unrelated
+
+    Returns: (E, E) int64 array where E = p*(p-1)
+    """
+    E: int = p * (p - 1)
+
+    # Build (u, v) for each edge index
+    edge_uv: list[tuple[int, int]] = []
+    for u in range(p):
+        for v in range(p):
+            if u != v:
+                edge_uv.append((u, v))
+
+    rel: np.ndarray = np.full((E, E), 5, dtype=np.int64)  # default: unrelated
+
+    for e1 in range(E):
+        u1, v1 = edge_uv[e1]
+        for e2 in range(E):
+            u2, v2 = edge_uv[e2]
+
+            if u1 == v2 and v1 == u2:
+                rel[e1, e2] = 0  # reverse pair
+            elif u1 == u2:
+                rel[e1, e2] = 1  # shared source
+            elif v1 == v2:
+                rel[e1, e2] = 2  # shared target
+            elif v1 == u2:
+                rel[e1, e2] = 3  # forward chain
+            elif u1 == v2:
+                rel[e1, e2] = 4  # backward chain
+            # else: 5 (unrelated, already set)
+
+    return rel
+
+
+# Cache struct rel matrices per p (only 3-10 variables in this dataset)
+_STRUCT_REL_CACHE: dict[int, np.ndarray] = {}
+
+
+def get_struct_rel_matrix(p: int) -> np.ndarray:
+    global _STRUCT_REL_CACHE
+    if p not in _STRUCT_REL_CACHE:
+        _STRUCT_REL_CACHE[p] = build_struct_rel_matrix(p)
+    return _STRUCT_REL_CACHE[p]
+
+
+# ============================================================
+# Sample Builder
 # ============================================================
 def _build_single(args: tuple) -> dict:
-    """Worker: builds edge tensor + precomputes all labels for one sample."""
     df: pd.DataFrame
     y_df: pd.DataFrame | None
     df, y_df = args
@@ -351,296 +373,10 @@ def _build_single(args: tuple) -> dict:
     return result
 
 
-def _remap_xy_names(
-    cols: list[str], new_x: str, new_y: str
-) -> dict[str, str]:
-    result: list[str] = list(cols)
-    pos: dict[str, int] = {c: i for i, c in enumerate(cols)}
-    i_nx: int = pos[new_x]
-    i_x: int = pos["X"]
-    result[i_nx], result[i_x] = result[i_x], result[i_nx]
-    pos2: dict[str, int] = {c: i for i, c in enumerate(result)}
-    i_ny: int = pos2[new_y]
-    i_y: int = pos2["Y"]
-    result[i_ny], result[i_y] = result[i_y], result[i_ny]
-    return {cols[i]: result[i] for i in range(len(cols))}
-
-
-def _build_all_from_one_graph(args: tuple) -> list[dict]:
-    """Build base + all augmented samples from one graph.
-    Key optimization: kernel regression computed ONCE, edge_data reused for all
-    augmented pairs (XY remap only changes column names, not data).
-    """
-    df: pd.DataFrame
-    y_df: pd.DataFrame
-    df, y_df = args
-
-    # === Expensive part: compute edge_data ONCE ===
-    edge_data: np.ndarray
-    _: np.ndarray
-    edge_data, _ = build_edge_tensor(df)
-
-    cols: list[str] = list(df.columns)
-    p: int = len(cols)
-
-    def _make_sample(
-        cur_cols: list[str], cur_y_df: pd.DataFrame | None,
-    ) -> dict | None:
-        """Build a sample reusing precomputed edge_data (cheap: just edge_types + labels).
-        Returns None if the remap produces an invalid subgraph pattern."""
-        # Recompute edge_types based on current column names
-        edge_types: list[int] = []
-        for i, u_name in enumerate(cur_cols):
-            for j, v_name in enumerate(cur_cols):
-                if i != j:
-                    edge_types.append(_edge_type(u_name, v_name))
-        edge_types_arr: np.ndarray = np.array(edge_types, dtype=np.int64)
-
-        result: dict = {
-            "edge_data": edge_data,  # shared ref within graph group; pickle deduplicates
-            "edge_types": edge_types_arr,
-            "cols": cur_cols,
-            "p": p,
-        }
-
-        if cur_y_df is not None:
-            adj_np: np.ndarray = cur_y_df.values.astype(np.float32)
-            adj_cols: list[str] = list(cur_y_df.columns)
-            result["adj"] = adj_np
-
-            edge_labels: list[int] = []
-            for ui in range(p):
-                for vi in range(p):
-                    if ui != vi:
-                        edge_labels.append(int(adj_np[ui, vi]))
-            result["edge_labels"] = np.array(edge_labels, dtype=np.int64)
-
-            _, adjacency_label = create_graph_label()
-            df_adj: pd.DataFrame = pd.DataFrame(
-                adj_np, columns=adj_cols, index=adj_cols
-            )
-            try:
-                node_labels_dict: dict = get_labels(df_adj, adjacency_label)
-            except KeyError:
-                return None  # invalid subgraph pattern from remap — skip
-            other_nodes: list[str] = [c for c in cur_cols if c not in ("X", "Y")]
-            node_labels: list[int] = [
-                CLASS_NAMES.index(node_labels_dict[n]) for n in other_nodes
-            ]
-            result["node_labels"] = np.array(node_labels, dtype=np.int64)
-            result["other_nodes"] = other_nodes
-
-        return result
-
-    # === Base sample ===
-    results: list[dict] = [_make_sample(cols, y_df)]
-
-    # === Augmented samples (cheap — just relabel) ===
-    if y_df is not None:
-        adj_np: np.ndarray = y_df.values
-        col_idx: dict[str, int] = {c: i for i, c in enumerate(y_df.columns)}
-
-        for a_name in y_df.columns:
-            for b_name in y_df.columns:
-                if a_name == b_name:
-                    continue
-                if adj_np[col_idx[a_name], col_idx[b_name]] != 1:
-                    continue
-                if a_name == "X" and b_name == "Y":
-                    continue
-                rename_map: dict[str, str] = _remap_xy_names(cols, a_name, b_name)
-                new_cols: list[str] = [rename_map[c] for c in cols]
-                new_y_df: pd.DataFrame = y_df.rename(
-                    index=rename_map, columns=rename_map
-                )
-                sample: dict | None = _make_sample(new_cols, new_y_df)
-                if sample is not None:
-                    results.append(sample)
-
-    return results
-
-
 # ============================================================
-# Sharded Dataset + Sampler
+# Dataset & Collate
 # ============================================================
-def _flush_shard(
-    buffer: list[dict], shard_dir: str, shard_idx: int,
-) -> int:
-    """Write buffer to a shard file and return count."""
-    path: str = os.path.join(shard_dir, f"shard_{shard_idx:04d}.pkl")
-    with open(path, "wb") as f:
-        pickle.dump(buffer, f, protocol=pickle.HIGHEST_PROTOCOL)
-    n: int = len(buffer)
-    print(f"  Flushed shard {shard_idx}: {n} samples")
-    return n
-
-
-def _build_and_save_shards(
-    X_list: list, y_list: list | None,
-    shard_dir: str, n_workers: int = 10, augment: bool = False,
-) -> dict:
-    """Build samples in parallel and stream to shards on disk.
-    For augmented mode: submits 23.5K tasks (one per base graph),
-    each computing kernels once and returning ~11 augmented samples.
-    """
-    os.makedirs(shard_dir, exist_ok=True)
-    use_aug: bool = augment and y_list is not None
-
-    buffer: list[dict] = []
-    shard_sizes: list[int] = []
-    shard_idx: int = 0
-    n_collected: int = 0
-
-    import multiprocessing as mp
-    ctx = mp.get_context('fork')
-
-    if use_aug:
-        args: list[tuple] = [
-            (X_list[i], y_list[i]) for i in range(len(X_list))
-        ]
-        n_base: int = len(args)
-        print(f"Building augmented dataset ({n_base} base graphs, kernels computed once each, {n_workers} workers)...")
-
-        with ctx.Pool(processes=n_workers) as pool:
-            for result_list in tqdm(
-                pool.imap_unordered(_build_all_from_one_graph, args, chunksize=4),
-                total=n_base,
-            ):
-                for sample in result_list:
-                    buffer.append(sample)
-                    n_collected += 1
-
-                if len(buffer) >= SHARD_SIZE:
-                    shard_sizes.append(_flush_shard(buffer, shard_dir, shard_idx))
-                    shard_idx += 1
-                    buffer.clear()
-                    gc.collect()
-    else:
-        args = [
-            (X_list[i], y_list[i] if y_list else None)
-            for i in range(len(X_list))
-        ]
-        print(f"Building dataset ({len(args)} samples, {n_workers} workers)...")
-
-        with ctx.Pool(processes=n_workers) as pool:
-            for result in tqdm(
-                pool.imap_unordered(_build_single, args, chunksize=8),
-                total=len(args),
-            ):
-                buffer.append(result)
-                n_collected += 1
-
-                if len(buffer) >= SHARD_SIZE:
-                    shard_sizes.append(_flush_shard(buffer, shard_dir, shard_idx))
-                    shard_idx += 1
-                    buffer.clear()
-                    gc.collect()
-
-    # Flush remaining
-    if buffer:
-        shard_sizes.append(_flush_shard(buffer, shard_dir, shard_idx))
-        buffer.clear()
-        gc.collect()
-
-    meta: dict = {
-        "n_samples": n_collected,
-        "n_shards": len(shard_sizes),
-        "shard_sizes": shard_sizes,
-    }
-    with open(os.path.join(shard_dir, "meta.pkl"), "wb") as f:
-        pickle.dump(meta, f)
-    print(f"Done: {n_collected} samples in {len(shard_sizes)} shards.")
-    return meta
-
-
-class ShardGroupedSampler(Sampler):
-    """Yields indices grouped by shard. Shuffles shard order + within-shard each epoch."""
-
-    def __init__(self, shard_sizes: list[int], seed: int = 42):
-        self.shard_sizes: list[int] = shard_sizes
-        self.n_shards: int = len(shard_sizes)
-        self.total: int = sum(shard_sizes)
-        self.shard_offsets: list[int] = []
-        offset: int = 0
-        for s in shard_sizes:
-            self.shard_offsets.append(offset)
-            offset += s
-        self.epoch: int = 0
-        self.seed: int = seed
-
-    def __iter__(self):
-        rng = np.random.RandomState(self.seed + self.epoch)
-        shard_order: np.ndarray = rng.permutation(self.n_shards)
-        indices: list[int] = []
-        for si in shard_order:
-            local: np.ndarray = (
-                rng.permutation(self.shard_sizes[si]) + self.shard_offsets[si]
-            )
-            indices.extend(local.tolist())
-        return iter(indices)
-
-    def __len__(self) -> int:
-        return self.total
-
-    def set_epoch(self, epoch: int) -> None:
-        self.epoch = epoch
-
-
-class CausalEdgeDataset(Dataset):
-    """Shard-based dataset. Only one shard loaded at a time."""
-
-    def __init__(self, shard_dir: str):
-        with open(os.path.join(shard_dir, "meta.pkl"), "rb") as f:
-            meta: dict = pickle.load(f)
-        self.shard_dir: str = shard_dir
-        self.n_samples: int = meta["n_samples"]
-        self.n_shards: int = meta["n_shards"]
-        self.shard_sizes: list[int] = meta["shard_sizes"]
-        self._loaded_shard: int = -1
-        self._shard_data: list | None = None
-
-    def _find_shard(self, idx: int) -> tuple[int, int]:
-        offset: int = 0
-        for si, sz in enumerate(self.shard_sizes):
-            if idx < offset + sz:
-                return si, idx - offset
-            offset += sz
-        raise IndexError(f"Index {idx} out of range")
-
-    def _load_shard(self, shard_idx: int) -> None:
-        if self._loaded_shard == shard_idx:
-            return
-        path: str = os.path.join(
-            self.shard_dir, f"shard_{shard_idx:04d}.pkl"
-        )
-        with open(path, "rb") as f:
-            self._shard_data = pickle.load(f)
-        self._loaded_shard = shard_idx
-
-    def __len__(self) -> int:
-        return self.n_samples
-
-    def __getitem__(self, idx: int) -> dict:
-        shard_idx: int
-        local_idx: int
-        shard_idx, local_idx = self._find_shard(idx)
-        self._load_shard(shard_idx)
-        item: dict = self._shard_data[local_idx]
-        result: dict = {
-            "edge_data": torch.from_numpy(item["edge_data"]),
-            "edge_types": torch.from_numpy(item["edge_types"]),
-            "cols": item["cols"],
-            "p": item["p"],
-        }
-        if "edge_labels" in item:
-            result["edge_labels"] = torch.from_numpy(item["edge_labels"])
-            result["node_labels"] = torch.from_numpy(item["node_labels"])
-        return result
-
-
 class InMemoryDataset(Dataset):
-    """Simple in-memory dataset for inference."""
-
     def __init__(self, samples: list[dict]):
         self.samples: list[dict] = samples
 
@@ -661,45 +397,6 @@ class InMemoryDataset(Dataset):
         return result
 
 
-# ============================================================
-# Structural Relationship Matrix
-# ============================================================
-def build_struct_rel_matrix(p: int) -> np.ndarray:
-    """Build E×E matrix of structural relationship types for a p-node graph.
-    Types: 0=reverse, 1=shared_source, 2=shared_target, 3=fwd_chain, 4=bwd_chain, 5=unrelated
-    """
-    E: int = p * (p - 1)
-    edge_uv: list[tuple[int, int]] = []
-    for u in range(p):
-        for v in range(p):
-            if u != v:
-                edge_uv.append((u, v))
-    rel: np.ndarray = np.full((E, E), 5, dtype=np.int64)
-    for e1 in range(E):
-        u1, v1 = edge_uv[e1]
-        for e2 in range(E):
-            u2, v2 = edge_uv[e2]
-            if u1 == v2 and v1 == u2:
-                rel[e1, e2] = 0
-            elif u1 == u2:
-                rel[e1, e2] = 1
-            elif v1 == v2:
-                rel[e1, e2] = 2
-            elif v1 == u2:
-                rel[e1, e2] = 3
-            elif u1 == v2:
-                rel[e1, e2] = 4
-    return rel
-
-_STRUCT_REL_CACHE: dict[int, np.ndarray] = {}
-
-def get_struct_rel_matrix(p: int) -> np.ndarray:
-    global _STRUCT_REL_CACHE
-    if p not in _STRUCT_REL_CACHE:
-        _STRUCT_REL_CACHE[p] = build_struct_rel_matrix(p)
-    return _STRUCT_REL_CACHE[p]
-
-
 def collate_fn(batch: list[dict]) -> dict:
     max_E: int = max(item["edge_data"].shape[0] for item in batch)
     B: int = len(batch)
@@ -707,7 +404,12 @@ def collate_fn(batch: list[dict]) -> dict:
     edge_data: torch.Tensor = torch.zeros(B, max_E, N_CHANNELS, N_OBS)
     edge_types: torch.Tensor = torch.zeros(B, max_E, dtype=torch.long)
     edge_mask: torch.Tensor = torch.zeros(B, max_E, dtype=torch.bool)
-    struct_rel: torch.Tensor = torch.full((B, max_E, max_E), 5, dtype=torch.long)
+
+    # Structural relationship matrix: (B, max_E, max_E)
+    # Default to type 5 (unrelated) for padding
+    struct_rel: torch.Tensor = torch.full(
+        (B, max_E, max_E), 5, dtype=torch.long
+    )
 
     max_K: int = max(
         (item["node_labels"].shape[0] if "node_labels" in item else 0)
@@ -727,6 +429,7 @@ def collate_fn(batch: list[dict]) -> dict:
         edge_mask[b, :E] = True
         cols_list.append(item["cols"])
 
+        # Build struct rel matrix for this graph's p
         p: int = item["p"]
         rel_mat: np.ndarray = get_struct_rel_matrix(p)
         struct_rel[b, :E, :E] = torch.from_numpy(rel_mat)
@@ -753,7 +456,7 @@ def collate_fn(batch: list[dict]) -> dict:
 
 
 # ============================================================
-# Model Architecture — v2 baseline with N_CHANNELS=8
+# Model Architecture — v8b + Structural Attention Bias
 # ============================================================
 class ConvBlock(nn.Module):
     def __init__(self, d: int, kernel_size: int = 3, n_groups: int = 8):
@@ -802,43 +505,76 @@ class EdgeFeatureExtractor(nn.Module):
 
 class StructuralSelfAttention(nn.Module):
     """Self-attention with graph-structural bias.
-    Learned scalar bias per head for each of 6 structural relationship types.
+
+    Standard multi-head attention + a learned scalar bias per head
+    for each of the 6 structural relationship types between edge pairs.
+    The bias is added to attention logits before softmax.
     """
-    def __init__(self, d: int = 64, n_heads: int = 4, n_struct_types: int = 6):
+
+    def __init__(
+        self, d: int = 64, n_heads: int = 4,
+        n_struct_types: int = 6,
+    ):
         super().__init__()
         self.d: int = d
         self.n_heads: int = n_heads
         self.head_dim: int = d // n_heads
+
+        # Standard QKV projections
         self.q_proj = nn.Linear(d, d)
         self.k_proj = nn.Linear(d, d)
         self.v_proj = nn.Linear(d, d)
         self.out_proj = nn.Linear(d, d)
+
+        # Structural bias: (n_struct_types, n_heads) — one scalar per type per head
         self.struct_bias = nn.Embedding(n_struct_types, n_heads)
-        nn.init.zeros_(self.struct_bias.weight)
+        nn.init.zeros_(self.struct_bias.weight)  # start neutral
+
+        # Standard transformer block components
         self.norm1 = nn.LayerNorm(d)
-        self.ff = nn.Sequential(nn.Linear(d, 4 * d), nn.GELU(), nn.Linear(4 * d, d))
+        self.ff = nn.Sequential(
+            nn.Linear(d, 4 * d), nn.GELU(), nn.Linear(4 * d, d)
+        )
         self.norm2 = nn.LayerNorm(d)
+
         self.scale: float = self.head_dim ** -0.5
 
     def forward(
-        self, x: torch.Tensor, struct_rel: torch.Tensor,
-        key_padding_mask: torch.Tensor | None = None,
+        self,
+        x: torch.Tensor,              # (B, E, d)
+        struct_rel: torch.Tensor,      # (B, E, E) int64 — relationship types
+        key_padding_mask: torch.Tensor | None = None,  # (B, E) bool, True=pad
     ) -> torch.Tensor:
         B, E, _ = x.shape
-        Q = self.q_proj(x).view(B, E, self.n_heads, self.head_dim).transpose(1, 2)
-        K = self.k_proj(x).view(B, E, self.n_heads, self.head_dim).transpose(1, 2)
-        V = self.v_proj(x).view(B, E, self.n_heads, self.head_dim).transpose(1, 2)
-        attn_scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
-        bias = self.struct_bias(struct_rel).permute(0, 3, 1, 2)
+
+        # QKV
+        Q: torch.Tensor = self.q_proj(x).view(B, E, self.n_heads, self.head_dim).transpose(1, 2)  # (B, H, E, hd)
+        K: torch.Tensor = self.k_proj(x).view(B, E, self.n_heads, self.head_dim).transpose(1, 2)
+        V: torch.Tensor = self.v_proj(x).view(B, E, self.n_heads, self.head_dim).transpose(1, 2)
+
+        # Attention scores: (B, H, E, E)
+        attn_scores: torch.Tensor = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
+
+        # Structural bias: lookup (B, E, E) → (B, E, E, H) → (B, H, E, E)
+        bias: torch.Tensor = self.struct_bias(struct_rel)  # (B, E, E, H)
+        bias = bias.permute(0, 3, 1, 2)  # (B, H, E, E)
         attn_scores = attn_scores + bias
+
+        # Padding mask: set padded positions to -inf
         if key_padding_mask is not None:
-            mask_expanded = key_padding_mask.unsqueeze(1).unsqueeze(2)
+            # key_padding_mask: (B, E), True where padded
+            mask_expanded: torch.Tensor = key_padding_mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, E)
             attn_scores = attn_scores.masked_fill(mask_expanded, float('-inf'))
-        attn_weights = F.softmax(attn_scores, dim=-1)
-        attn_weights = torch.nan_to_num(attn_weights, nan=0.0)
-        attn_out = torch.matmul(attn_weights, V)
+
+        attn_weights: torch.Tensor = F.softmax(attn_scores, dim=-1)
+        attn_weights = torch.nan_to_num(attn_weights, nan=0.0)  # handle all-masked rows
+
+        # Apply attention
+        attn_out: torch.Tensor = torch.matmul(attn_weights, V)  # (B, H, E, hd)
         attn_out = attn_out.transpose(1, 2).contiguous().view(B, E, self.d)
         attn_out = self.out_proj(attn_out)
+
+        # Residual + FFN
         x = self.norm1(x + attn_out)
         x = self.norm2(x + self.ff(x))
         return x
@@ -846,7 +582,8 @@ class StructuralSelfAttention(nn.Module):
 
 class ADIAModel(nn.Module):
     """
-    v11: v8b + graph-structural attention bias.
+    v11: v8b architecture + graph-structural attention bias.
+    Only change: SelfAttentionLayer → StructuralSelfAttention.
     """
 
     def __init__(
@@ -862,10 +599,13 @@ class ADIAModel(nn.Module):
         self.extractor = EdgeFeatureExtractor(d, n_channels=N_CHANNELS)
         self.edge_type_emb = nn.Embedding(n_edge_types, d)
         self.edge_merge = MergeOperator(n_inputs=2, d=d)
+
+        # === THE CHANGE: structural attention instead of vanilla ===
         self.attn_layers = nn.ModuleList(
             [StructuralSelfAttention(d, n_heads=N_HEADS, n_struct_types=N_STRUCT_TYPES)
              for _ in range(2)]
         )
+
         self.edge_head = nn.Linear(d, 2)
         self.node_merge = MergeOperator(n_inputs=4, d=d)
         self.node_head = nn.Linear(d, N_CLASSES)
@@ -878,10 +618,6 @@ class ADIAModel(nn.Module):
         cols_list: list[list[str]],
         struct_rel: torch.Tensor = None,
     ) -> tuple:
-        B: int
-        E: int
-        C: int
-        N: int
         B, E, C, N = edge_data.shape
 
         if self.training and self.aug_noise_std > 0:
@@ -892,16 +628,19 @@ class ADIAModel(nn.Module):
         type_emb: torch.Tensor = self.edge_type_emb(edge_types)
         edge_emb: torch.Tensor = self.edge_merge([conv_emb, type_emb])
 
-        # Build struct_rel on the fly if not provided
+        inv_mask: torch.Tensor = ~edge_mask
+
+        # If no struct_rel provided (e.g. inference without it), build on the fly
         if struct_rel is None:
-            struct_rel = torch.full((B, E, E), 5, dtype=torch.long, device=edge_data.device)
+            struct_rel = torch.full(
+                (B, E, E), 5, dtype=torch.long, device=edge_data.device
+            )
             for b in range(B):
                 p: int = len(cols_list[b])
                 e: int = p * (p - 1)
-                rel = get_struct_rel_matrix(p)
+                rel: np.ndarray = get_struct_rel_matrix(p)
                 struct_rel[b, :e, :e] = torch.from_numpy(rel).to(edge_data.device)
 
-        inv_mask: torch.Tensor = ~edge_mask
         for layer in self.attn_layers:
             edge_emb = layer(edge_emb, struct_rel, key_padding_mask=inv_mask)
 
@@ -1010,8 +749,6 @@ class ADIAModelWrapper(pl.LightningModule):
         )
 
     def _compute_loss(self, batch: dict, split: str) -> torch.Tensor:
-        edge_logits: torch.Tensor
-        node_logits_list: list
         edge_logits, node_logits_list = self(batch)
         B: int = edge_logits.shape[0]
 
@@ -1067,19 +804,21 @@ class ADIAModelWrapper(pl.LightningModule):
 
 
 # ============================================================
-# Train — XY augmented, shard-based
+# Train & Infer
 # ============================================================
 def train(
     X_train: typing.Dict[str, pd.DataFrame],
     y_train: typing.Dict[str, pd.DataFrame],
     model_directory_path: str,
+    seed: int = 42,
 ) -> None:
+    """Train one model with a specific seed."""
+    pl.seed_everything(seed)
     keys: list[str] = list(X_train.keys())
     X_list: list[pd.DataFrame] = [X_train[k] for k in keys]
     y_list: list[pd.DataFrame] = [y_train[k] for k in keys]
     os.makedirs(LOCAL_CACHE_DIR, exist_ok=True)
 
-    # Class weights (from base labels, reuse v8b weights if available)
     node_w_path: str = os.path.join(LOCAL_CACHE_DIR, "node_weights_v8b.pt")
     edge_w_path: str = os.path.join(LOCAL_CACHE_DIR, "edge_weights_v8b.pt")
     if os.path.exists(node_w_path) and os.path.exists(edge_w_path):
@@ -1091,44 +830,57 @@ def train(
         torch.save(node_w, node_w_path)
         torch.save(edge_w, edge_w_path)
 
-    # Build augmented sharded dataset
-    meta_path: str = os.path.join(SHARD_DIR, "meta.pkl")
-    if os.path.exists(meta_path):
-        print(f"Loading existing shards from {SHARD_DIR}...")
-        with open(meta_path, "rb") as f:
-            meta: dict = pickle.load(f)
+    # Reuse v8b base cache
+    cache_path: str = os.path.join(
+        LOCAL_CACHE_DIR, f"train_dataset_v8b_anm_base_nk{N_KERNEL}.pkl"
+    )
+    if os.path.exists(cache_path):
+        print(f"Loading cached dataset from {cache_path}...")
+        with open(cache_path, "rb") as f:
+            samples: list[dict] = pickle.load(f)
     else:
+        args: list[tuple] = [
+            (X_list[i], y_list[i]) for i in range(len(X_list))
+        ]
         import multiprocessing as mp
-        n_workers: int = max(1, min(mp.cpu_count() - 1, 40))
-        meta = _build_and_save_shards(
-            X_list, y_list, SHARD_DIR,
-            n_workers=n_workers, augment=True,
-        )
+        n_workers: int = max(1, mp.cpu_count() - 1)
+        print(f"Building dataset ({len(args)} samples, {n_workers} workers)...")
+        ctx = mp.get_context('fork')
+        with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
+            raw: list[dict] = [None] * len(args)
+            futures = {
+                pool.submit(_build_single, a): idx
+                for idx, a in enumerate(args)
+            }
+            for fut in tqdm(as_completed(futures), total=len(args)):
+                raw[futures[fut]] = fut.result()
+        samples = raw
+        with open(cache_path, "wb") as f:
+            pickle.dump(samples, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-    dataset = CausalEdgeDataset(SHARD_DIR)
-    sampler = ShardGroupedSampler(dataset.shard_sizes)
+    dataset = InMemoryDataset(samples)
     loader = DataLoader(
-        dataset, batch_size=BATCH_SIZE, sampler=sampler,
+        dataset, batch_size=BATCH_SIZE, shuffle=True,
         num_workers=2, collate_fn=collate_fn, pin_memory=True,
     )
-    print(f"Dataset: {len(dataset)} samples ({dataset.n_shards} shards)")
+    print(f"Dataset: {len(dataset)} samples, seed={seed}")
 
     wrapper = ADIAModelWrapper(
         d=D_MODEL, node_class_weights=node_w, edge_class_weights=edge_w,
         lr=LR, max_epochs=MAX_EPOCHS, aug_noise_std=AUG_NOISE_STD,
     )
-    print(f"Params: {sum(p.numel() for p in wrapper.model.parameters()):,}")
+    n_params: int = sum(p.numel() for p in wrapper.model.parameters())
+    print(f"Params: {n_params:,}")
 
     trainer = pl.Trainer(
         accelerator="gpu", devices=2, strategy="ddp",
         max_epochs=MAX_EPOCHS, precision="32-true",
-        use_distributed_sampler=False,  # ShardGroupedSampler handles it
+        use_distributed_sampler=True,
         logger=True, enable_checkpointing=True, enable_progress_bar=True,
     )
     trainer.fit(wrapper, loader)
 
-    # Save model (strip module. prefix from DDP)
-    path: str = os.path.join(model_directory_path, "model.pt")
+    path: str = os.path.join(model_directory_path, f"model_v11_ensemble_seed{seed}.pt")
     sd: dict = wrapper.model.state_dict()
     torch.save(
         {k.replace("module.", ""): v for k, v in sd.items()}, path
@@ -1136,9 +888,6 @@ def train(
     print(f"Model saved to {path}")
 
 
-# ============================================================
-# Inference (unchanged from v8b)
-# ============================================================
 @torch.no_grad()
 def infer_batch_local(dfs, model, device="cpu", batch_size=32, cache_dir=None):
     model = model.eval()
@@ -1173,7 +922,7 @@ def infer_batch_local(dfs, model, device="cpu", batch_size=32, cache_dir=None):
         "Independent": lambda n: [],
     }
     idx_off = 0
-    for batch in tqdm(loader, desc="infering"):
+    for batch in tqdm(loader, desc="inferring"):
         edge_logits, node_logits_list = model(
             batch["edge_data"].to(device), batch["edge_types"].to(device),
             batch["edge_mask"].to(device), batch["cols"],
@@ -1203,16 +952,42 @@ def infer_batch_local(dfs, model, device="cpu", batch_size=32, cache_dir=None):
         idx_off += edge_logits.shape[0]
     return results
 
-
 def infer(X_test, model_directory_path, id_column_name, prediction_column_name):
-    path = os.path.join(model_directory_path, "model.pt")
+    # path = os.path.join(model_directory_path, "model.pt")
+    # device = "cuda" if torch.cuda.is_available() else "cpu"
+    # model = ADIAModel(d=D_MODEL, aug_noise_std=0.0)
+    # model.load_state_dict(torch.load(path, map_location=device, weights_only=True))
+    # model.to(device).eval()
+    # dfs = [X_test[n] for n in X_test]
+    # cache_dir = None if IS_CLOUD_SUBMIT else LOCAL_CACHE_DIR
+    # adj_list = infer_batch_local(dfs, model, device=device, batch_size=64, cache_dir=cache_dir)
+    # submission = {}
+    # for name, A in zip(X_test.keys(), adj_list):
+    #     for i in A.columns:
+    #         for j in A.columns:
+    #             submission[f"{name}_{i}_{j}"] = int(A.loc[i, j])
+    # s = pd.Series(submission).reset_index()
+    # s.columns = [id_column_name, prediction_column_name]
+    # return s
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = ADIAModel(d=D_MODEL, aug_noise_std=0.0)
-    model.load_state_dict(torch.load(path, map_location=device, weights_only=True))
-    model.to(device).eval()
+    models: list[ADIAModel] = []
+    for seed in SEEDS:
+        model = ADIAModel(d=D_MODEL, aug_noise_std=0.0)
+        path = os.path.join(model_directory_path, f"model_v11_ensemble_seed{seed}.pt")
+        model.load_state_dict(torch.load(path, map_location=device, weights_only=True))
+        model.to(device).eval()
+        models.append(model)
+        print(f"Loaded {path}")
+
+    # Ensemble evaluation
     dfs = [X_test[n] for n in X_test]
+    names = list(X_test.keys())
+
     cache_dir = None if IS_CLOUD_SUBMIT else LOCAL_CACHE_DIR
-    adj_list = infer_batch_local(dfs, model, device=device, batch_size=64, cache_dir=cache_dir)
+    adj_list = infer_ensemble_local(
+        dfs, models, device=device, batch_size=64, cache_dir=cache_dir
+    )
+
     submission = {}
     for name, A in zip(X_test.keys(), adj_list):
         for i in A.columns:
@@ -1224,63 +999,193 @@ def infer(X_test, model_directory_path, id_column_name, prediction_column_name):
 
 
 # ============================================================
-# Main — local training + evaluation
+# Ensemble Inference — average logits across seeds
 # ============================================================
+@torch.no_grad()
+def infer_ensemble_local(
+    dfs, models: list, device="cpu", batch_size=32, cache_dir=None,
+):
+    """Run inference with multiple models, average node logits."""
+    models = [m.eval() for m in models]
+
+    cache_path = os.path.join(cache_dir, f"infer_v8b_nk{N_KERNEL}.pkl") if cache_dir else None
+    if cache_path and os.path.exists(cache_path):
+        with open(cache_path, "rb") as f:
+            all_items = pickle.load(f)
+    else:
+        import multiprocessing as mp
+        n_workers = max(1, mp.cpu_count() - 1)
+        args = [(df, None) for df in dfs]
+        print(f"Building edge tensors ({len(dfs)} graphs, {n_workers} workers)...")
+        ctx = mp.get_context('fork')
+        with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
+            all_items = list(tqdm(pool.map(_build_single, args, chunksize=8), total=len(args)))
+        if cache_path:
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(cache_path, "wb") as f:
+                pickle.dump(all_items, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    loader = DataLoader(InMemoryDataset(all_items), batch_size=batch_size,
+                        shuffle=False, num_workers=0, collate_fn=collate_fn)
+
+    patterns = {
+        "Confounder": lambda n: [(n, "X"), (n, "Y")],
+        "Collider": lambda n: [("X", n), ("Y", n)],
+        "Mediator": lambda n: [("X", n), (n, "Y")],
+        "Cause of X": lambda n: [(n, "X")],
+        "Cause of Y": lambda n: [(n, "Y")],
+        "Consequence of X": lambda n: [("X", n)],
+        "Consequence of Y": lambda n: [("Y", n)],
+        "Independent": lambda n: [],
+    }
+
+    results = [None] * len(all_items)
+    idx_off = 0
+    for batch in tqdm(loader, desc="ensemble inferring"):
+        ed = batch["edge_data"].to(device)
+        et = batch["edge_types"].to(device)
+        em = batch["edge_mask"].to(device)
+        sr = batch["struct_rel"].to(device)
+        cols = batch["cols"]
+
+        # Collect node logits from all models
+        all_model_node_logits: list[list] = []
+        for model in models:
+            _, node_logits_list = model(ed, et, em, cols, struct_rel=sr)
+            all_model_node_logits.append(node_logits_list)
+
+        B = len(cols)
+        for b in range(B):
+            item = all_items[idx_off + b]
+            cols_b, p = item["cols"], item["p"]
+
+            # Average node logits across models
+            node_logits_per_model = [
+                all_model_node_logits[m][b]
+                for m in range(len(models))
+            ]
+
+            if node_logits_per_model[0] is not None:
+                # Average softmax probabilities
+                avg_probs = torch.zeros_like(
+                    torch.softmax(node_logits_per_model[0], dim=-1)
+                )
+                for nl in node_logits_per_model:
+                    avg_probs += torch.softmax(nl, dim=-1)
+                avg_probs /= len(models)
+
+                other_nodes = [n for n in cols_b if n not in ("X", "Y")]
+                node_preds = torch.argmax(avg_probs, dim=-1)
+
+                adj = np.zeros((p, p), dtype=int)
+                xi_idx = cols_b.index("X")
+                yi_idx = cols_b.index("Y")
+                adj[xi_idx, yi_idx] = 1
+
+                for k, nn_ in enumerate(other_nodes):
+                    for (s, d) in patterns[CLASS_NAMES[node_preds[k].item()]](nn_):
+                        si = cols_b.index(s)
+                        di = cols_b.index(d)
+                        adj[si, di] = 1
+
+                A = pd.DataFrame(adj, columns=cols_b, index=cols_b)
+            else:
+                adj = np.zeros((p, p), dtype=int)
+                xi_idx = cols_b.index("X")
+                yi_idx = cols_b.index("Y")
+                adj[xi_idx, yi_idx] = 1
+                A = pd.DataFrame(adj, columns=cols_b, index=cols_b)
+
+            results[idx_off + b] = A
+        idx_off += B
+    return results
+
+
+# ============================================================
+# Main — 3-seed ensemble
+# ============================================================
+
 if __name__ == "__main__":
     print("=" * 60)
-    print("v11 Structural Attention Bias + XY aug")
-    print(f"Channels: {N_CHANNELS} (2 sorted + {len(BANDWIDTHS)} kernel + {len(BANDWIDTHS)} ANM)")
-    print(f"Config: bs={BATCH_SIZE}, lr={LR}, epochs={MAX_EPOCHS}")
-    print(f"Shard dir: {SHARD_DIR}")
+    print("v11 Structural Attention Bias — 3-Seed Ensemble")
+    print(f"  6 struct types, {N_HEADS} heads, d={D_MODEL}")
+    print(f"  Config: bs={BATCH_SIZE}, lr={LR}, epochs={MAX_EPOCHS}")
+    print(f"  Seeds: {SEEDS}")
     print("=" * 60)
 
     # X_train = pd.read_pickle("data/X_train.pickle")
     # y_train = pd.read_pickle("data/y_train.pickle")
     # print(f"Loaded {len(X_train)} training samples.")
-    # train(X_train, y_train, model_directory_path="resources")
 
-    # Only rank 0 runs evaluation (DDP spawns 2 processes that both hit __main__)
-    rank = int(os.environ.get("LOCAL_RANK", 0))
-    if rank != 0:
-        exit(0)
+    # # Train 3 models with different seeds
+    # for seed in SEEDS:
+    #     print(f"\n{'='*40} Training seed={seed} {'='*40}")
+    #     train(X_train, y_train, model_directory_path="resources", seed=seed)
+
+    # # DDP guard — only rank 0 runs evaluation
+    # rank = int(os.environ.get("LOCAL_RANK", 0))
+    # if rank != 0:
+    #     exit(0)
+
+    # # Load all 3 models
+    # device = "cuda" if torch.cuda.is_available() else "cpu"
+    # models: list[ADIAModel] = []
+    # for seed in SEEDS:
+    #     model = ADIAModel(d=D_MODEL, aug_noise_std=0.0)
+    #     path = f"resources/model_v11_ensemble_seed{seed}.pt"
+    #     model.load_state_dict(torch.load(path, map_location=device, weights_only=True))
+    #     model.to(device).eval()
+    #     models.append(model)
+    #     print(f"Loaded {path}")
+
+    # Ensemble evaluation
+    # X_test = pd.read_pickle("data/X_test_reduced.pickle")
+    # y_test = pd.read_pickle("data/y_test_reduced.pickle")
+    # dfs = [X_test[n] for n in X_test]
+    # names = list(X_test.keys())
+
+    # adj_list = infer_ensemble_local(
+    #     dfs, models, device=device, batch_size=64, cache_dir=LOCAL_CACHE_DIR
+    # )
+    # adj_list = 
+
+    # adjacency_label = get_adjacency_label()
+    # cc = {c: 0 for c in CLASS_NAMES}
+    # ct = {c: 0 for c in CLASS_NAMES}
+    # for name, A in zip(names, adj_list):
+    #     pl_ = get_labels(A, adjacency_label)
+    #     tl = get_labels(y_test[name], adjacency_label)
+    #     for v in tl:
+    #         ct[tl[v]] += 1
+    #         if pl_.get(v, "Independent") == tl[v]:
+    #             cc[tl[v]] += 1
+
+    # print("\n" + "=" * 60)
+    # print("ENSEMBLE Per-class accuracy:")
+    # accs = []
+    # for cls in CLASS_NAMES:
+    #     n = ct[cls]
+    #     acc = cc[cls] / n if n > 0 else 0.0
+    #     accs.append(acc)
+    #     print(f"  {cls:25s}: {acc:.4f}  (n={n})")
+    # print(f"\nENSEMBLE Balanced Accuracy: {np.mean(accs):.4f}")
+
+    # # Also eval individual seeds for comparison
+    # for seed in SEEDS:
+    #     model = models[SEEDS.index(seed)]
+    #     adj_list_single = infer_batch_local(
+    #         dfs, model, device=device, batch_size=64, cache_dir=LOCAL_CACHE_DIR
+    #     )
+    #     cc_s = {c: 0 for c in CLASS_NAMES}
+    #     for name, A in zip(names, adj_list_single):
+    #         pl_ = get_labels(A, adjacency_label)
+    #         tl = get_labels(y_test[name], adjacency_label)
+    #         for v in tl:
+    #             if pl_.get(v, "Independent") == tl[v]:
+    #                 cc_s[tl[v]] += 1
+    #     accs_s = [cc_s[c] / ct[c] if ct[c] > 0 else 0 for c in CLASS_NAMES]
+    #     print(f"  Seed {seed}: {np.mean(accs_s):.4f}")
 
     X_test = pd.read_pickle("data/X_test_reduced.pickle")
-    y_test = pd.read_pickle("data/y_test_reduced.pickle")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = ADIAModel(d=D_MODEL, aug_noise_std=0.0)
-    model.load_state_dict(torch.load("resources/model_v11_structbias_xyaug.pt", map_location=device, weights_only=True))
-    model.to(device).eval()
-    dfs = [X_test[n] for n in X_test]
-    names = list(X_test.keys())
-    adj_list = infer_batch_local(dfs, model, device=device, batch_size=64, cache_dir=LOCAL_CACHE_DIR)
-    adjacency_label = get_adjacency_label()
-    cc = {c: 0 for c in CLASS_NAMES}
-    ct = {c: 0 for c in CLASS_NAMES}
-    for name, A in zip(names, adj_list):
-        pl_ = get_labels(A, adjacency_label)
-        tl = get_labels(y_test[name], adjacency_label)
-        for v in tl:
-            ct[tl[v]] += 1
-            if pl_.get(v, "Independent") == tl[v]:
-                cc[tl[v]] += 1
-    print("\nPer-class accuracy:")
-    accs = []
-    for cls in CLASS_NAMES:
-        n = ct[cls]
-        acc = cc[cls] / n if n > 0 else 0.0
-        accs.append(acc)
-        print(f"  {cls:25s}: {acc:.4f}  (n={n})")
-    print(f"\nBalanced Accuracy: {np.mean(accs):.4f}")
-    
-    # Confusion analysis for Mediator
-    from collections import Counter
-    confusion = Counter()
-    for name, A in zip(names, adj_list):
-        pl_ = get_labels(A, adjacency_label)
-        tl = get_labels(y_test[name], adjacency_label)
-        for v in tl:
-            if tl[v] == "Mediator" and pl_.get(v, "Independent") != "Mediator":
-                confusion[pl_.get(v, "Independent")] += 1
-    print("\nMediator confused with:")
-    for cls, cnt in confusion.most_common():
-        print(f"  {cls}: {cnt}")
+    y_pred = infer(X_test, model_directory_path="resources", id_column_name="example_id", prediction_column_name="prediction")
+    y_pred.to_parquet("prediction/prediction_v11_ensemble.parquet")

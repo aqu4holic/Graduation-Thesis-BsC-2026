@@ -830,7 +830,7 @@ if __name__ == "__main__":
     names = list(X_test.keys())
     dfs = [X_test[n] for n in names]
     adj_list = infer_batch_local(dfs, model, device=device, batch_size=64,
-                                 cache_dir=None)
+      cache_dir=LOCAL_CACHE_DIR)
 
     adjacency_label = get_adjacency_label()
     class_correct = {c: 0 for c in CLASS_NAMES}
