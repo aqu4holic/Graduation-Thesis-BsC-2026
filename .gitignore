@@ -16,3 +16,4 @@ wheels/
 *prediction/
 *resources/
 *cache*/
+*catboost_info/

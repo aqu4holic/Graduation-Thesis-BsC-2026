@@ -5,6 +5,7 @@ description = "Thesis project about causal discovery"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "catboost>=1.2.10",
     "causal-learn>=0.1.4.4",
     "crunch-cli>=8.0.0",
     "dcor>=0.7",

@@ -130,5 +130,5 @@ y_test = pd.read_pickle("data/y_test_reduced.pickle")
 score = evaluate_predictions(
     X_test,
     y_test,
-    y_pred_path="prediction/prediction_v11_ensemble.parquet",
+    y_pred_path="prediction/v12_predictions.parquet",
 )

@@ -13,6 +13,7 @@ Run:
 """
 
 from __future__ import annotations
+from fontTools.misc.symfont import X
 
 # @crunch/keep:on
 import os
@@ -39,7 +40,7 @@ from v12_features import (
     build_from_pickles,
     CLASS_NAMES,
     N_SUB,
-    N_CHANNELS,
+    # N_CHANNELS,
 )
 from v12_model import (
     V12Model,
@@ -47,6 +48,7 @@ from v12_model import (
     N_NODE_FEATS,
     N_EXTRA_EDGE,
     N_CLASSES,
+    N_CHANNELS,
 )
 
 # ─── Config ───────────────────────────────────────────────────────────────────
@@ -228,7 +230,8 @@ class V12Wrapper(pl.LightningModule):
         labels_flat = labels.view(B * n)
         loss = F.cross_entropy(
             logits_flat, labels_flat,
-            weight=self.class_weights.to(self.device),
+            # weight=self.class_weights.to(self.device),
+            weight=self.class_weights,
             ignore_index=-1,
         )
         return loss
@@ -253,8 +256,8 @@ class V12Wrapper(pl.LightningModule):
         logits = self(batch)
         loss   = self._compute_loss(logits, batch)
         acc    = self._compute_acc(logits, batch)
-        self.log("val_loss", loss, prog_bar=True, sync_dist=True)
-        self.log("val_acc",  acc,  prog_bar=True, sync_dist=True)
+        self.log("val_loss", loss, prog_bar=True, sync_dist=False)
+        self.log("val_acc",  acc,  prog_bar=True, sync_dist=False)
 
     def configure_optimizers(self):
         opt = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=1e-2)
@@ -281,7 +284,7 @@ def train(model_directory_path: str = "resources") -> None:
     val_shards   = shard_paths[:1]
     train_shards = shard_paths[1:]
 
-    train_ds = GraphDataset(train_shards, shuffle_items=True)
+    train_ds = GraphDataset(shard_paths, shuffle_items=True)
     val_ds   = GraphDataset(val_shards,   shuffle_items=False)
 
     train_loader = DataLoader(
@@ -291,6 +294,7 @@ def train(model_directory_path: str = "resources") -> None:
     val_loader = DataLoader(
         val_ds, batch_size=BATCH_SIZE, shuffle=False,
         num_workers=0, collate_fn=collate_graph_fn,
+        drop_last=True,
     )
 
     wrapper = V12Wrapper()
@@ -305,10 +309,12 @@ def train(model_directory_path: str = "resources") -> None:
     trainer = pl.Trainer(
         max_epochs=N_EPOCHS,
         accelerator="gpu", devices=2, strategy="ddp",
-        precision="16-mixed",
+        precision="32-true",
+        gradient_clip_val=1.0,
         callbacks=[checkpoint_cb],
         enable_progress_bar=True,
         log_every_n_steps=10,
+        logger=True, enable_checkpointing=True
     )
     trainer.fit(wrapper, train_loader, val_loader)
 
@@ -402,6 +408,45 @@ def infer_batch_local(
 
 # ─── CrunchDAO infer ──────────────────────────────────────────────────────────
 
+# def infer(
+#     X_test: typing.Dict[str, pd.DataFrame],
+#     model_directory_path: str,
+#     id_column_name: str,
+#     prediction_column_name: str,
+# ) -> pd.DataFrame:
+#     """CrunchDAO submission entry point."""
+#     from v12_features import _build_one_graph
+
+#     device = "cuda" if torch.cuda.is_available() else "cpu"
+#     model = _load_model(model_directory_path).to(device).eval()
+
+#     submission: dict[str, int] = {}
+#     names = list(X_test.keys())
+
+#     for name in tqdm(names, desc="Inference"):
+#         df   = X_test[name]
+#         cols = list(df.columns)
+
+#         # Feature extraction (no cache on cloud)
+#         cache_path = None if IS_CLOUD_SUBMIT else None  # could add local cache if desired
+#         gd = _build_one_graph((df, None))
+#         if gd is None:
+#             # Fallback: predict Independent for all
+#             for v in cols:
+#                 if v not in ("X", "Y"):
+#                     key = f"{name}_{v}"
+#                     submission[key] = CLASS_NAMES.index("Independent")
+#             continue
+
+#         preds = _infer_one_graph(gd, "X", "Y", model, device)
+#         for v_name, cls_idx in preds.items():
+#             key = f"{name}_{v_name}"
+#             submission[key] = cls_idx
+
+#     s = pd.Series(submission).reset_index()
+#     s.columns = [id_column_name, prediction_column_name]
+#     return s
+
 def infer(
     X_test: typing.Dict[str, pd.DataFrame],
     model_directory_path: str,
@@ -409,48 +454,168 @@ def infer(
     prediction_column_name: str,
 ) -> pd.DataFrame:
     """CrunchDAO submission entry point."""
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor, as_completed
     from v12_features import _build_one_graph
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = _load_model(model_directory_path).to(device).eval()
 
-    submission: dict[str, int] = {}
     names = list(X_test.keys())
+    n_workers = max(1, mp.cpu_count() - 1)
+    cache_dir = None if IS_CLOUD_SUBMIT else CACHE_DIR
 
-    for name in tqdm(names, desc="Inference"):
-        df   = X_test[name]
-        cols = list(df.columns)
+    # ── Step 1: parallel feature extraction (with optional cache) ─────────────
+    graph_data: list = [None] * len(names)
+    to_build: list[tuple[int, str]] = []
 
-        # Feature extraction (no cache on cloud)
-        cache_path = None if IS_CLOUD_SUBMIT else None  # could add local cache if desired
-        gd = _build_one_graph((df, None))
+    if cache_dir is not None:
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_paths = [os.path.join(cache_dir, f"infer_{name}.pkl") for name in names]
+        cached = [os.path.exists(p) for p in cache_paths]
+
+        # Load all cached graphs at once
+        print(f"Loading {sum(cached)} cached graphs...")
+        for i, (name, path, hit) in enumerate(zip(names, cache_paths, cached)):
+            if hit:
+                with open(path, "rb") as f:
+                    graph_data[i] = pickle.load(f)
+            else:
+                to_build.append((i, name))
+        print(f"Cache hit: {sum(cached)}/{len(names)}. Building {len(to_build)}...")
+    else:
+        to_build = list(enumerate(names))
+        print(f"Cloud submit — no cache. Building {len(to_build)} graphs...")
+
+    if to_build:
+        args = [(X_test[name], None) for _, name in to_build]
+        ctx = mp.get_context("fork")
+        with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as exe:
+            futures = {exe.submit(_build_one_graph, a): (idx, name)
+                       for a, (idx, name) in zip(args, to_build)}
+            for fut in tqdm(as_completed(futures), total=len(to_build), desc="Extracting"):
+                idx, name = futures[fut]
+                try:
+                    gd = fut.result()
+                except Exception as e:
+                    print(f"  Failed {name}: {e}")
+                    gd = None
+                graph_data[idx] = gd
+
+        # Save all newly built graphs at once
+        if cache_dir is not None:
+            print(f"Saving {len(to_build)} graphs to cache...")
+            for idx, name in to_build:
+                gd = graph_data[idx]
+                if gd is not None:
+                    with open(os.path.join(cache_dir, f"infer_{name}.pkl"), "wb") as f:
+                        pickle.dump(gd, f, protocol=4)
+            print("Cache saved.")
+
+    # ── Step 2: GPU inference ─────────────────────────────────────────────────
+    submission: dict[str, int] = {}
+    for name, gd in tqdm(zip(names, graph_data), total=len(names), desc="Inference"):
+        cols = list(X_test[name].columns)
         if gd is None:
-            # Fallback: predict Independent for all
             for v in cols:
                 if v not in ("X", "Y"):
-                    key = f"{name}_{v}"
-                    submission[key] = CLASS_NAMES.index("Independent")
+                    submission[f"{name}_{v}"] = CLASS_NAMES.index("Independent")
             continue
 
         preds = _infer_one_graph(gd, "X", "Y", model, device)
         for v_name, cls_idx in preds.items():
-            key = f"{name}_{v_name}"
-            submission[key] = cls_idx
+            submission[f"{name}_{v_name}"] = cls_idx
 
     s = pd.Series(submission).reset_index()
     s.columns = [id_column_name, prediction_column_name]
     return s
 
 
+# def infer(
+#     X_test: typing.Dict[str, pd.DataFrame],
+#     model_directory_path: str,
+#     id_column_name: str,
+#     prediction_column_name: str,
+# ) -> pd.DataFrame:
+#     """CrunchDAO submission entry point."""
+#     import multiprocessing as mp
+#     from concurrent.futures import ProcessPoolExecutor, as_completed
+#     from v12_features import _build_one_graph
+
+#     device = "cuda" if torch.cuda.is_available() else "cpu"
+#     model = _load_model(model_directory_path).to(device).eval()
+
+#     names = list(X_test.keys())
+#     n_workers = max(1, mp.cpu_count() - 1)
+#     cache_path = None if IS_CLOUD_SUBMIT else os.path.join(CACHE_DIR, "infer_cache.pkl")
+
+#     # ── Step 1: feature extraction ────────────────────────────────────────────
+#     graph_data: list = [None] * len(names)
+
+#     if cache_path is not None and os.path.exists(cache_path):
+#         print(f"Loading inference cache from {cache_path}...")
+#         with open(cache_path, "rb") as f:
+#             graph_data = pickle.load(f)
+#         print(f"Loaded {len(graph_data)} graphs from cache.")
+#     else:
+#         print(f"Building {len(names)} graphs with {n_workers} workers...")
+#         args = [(X_test[name], None) for name in names]
+#         ctx = mp.get_context("fork")
+#         with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as exe:
+#             futures = {exe.submit(_build_one_graph, a): i for i, a in enumerate(args)}
+#             for fut in tqdm(as_completed(futures), total=len(names), desc="Extracting"):
+#                 idx = futures[fut]
+#                 try:
+#                     graph_data[idx] = fut.result()
+#                 except Exception as e:
+#                     print(f"  Failed {names[idx]}: {e}")
+#                     graph_data[idx] = None
+
+#         if cache_path is not None:
+#             os.makedirs(CACHE_DIR, exist_ok=True)
+#             print(f"Saving inference cache to {cache_path}...")
+#             with open(cache_path, "wb") as f:
+#                 pickle.dump(graph_data, f, protocol=4)
+#             print("Cache saved.")
+
+#     # ── Step 2: GPU inference ─────────────────────────────────────────────────
+#     submission: dict[str, int] = {}
+#     for name, gd in tqdm(zip(names, graph_data), total=len(names), desc="Inference"):
+#         cols = list(X_test[name].columns)
+#         if gd is None:
+#             for v in cols:
+#                 if v not in ("X", "Y"):
+#                     submission[f"{name}_{v}"] = CLASS_NAMES.index("Independent")
+#             continue
+
+#         preds = _infer_one_graph(gd, "X", "Y", model, device)
+#         for v_name, cls_idx in preds.items():
+#             submission[f"{name}_{v_name}"] = cls_idx
+
+#     s = pd.Series(submission).reset_index()
+#     s.columns = [id_column_name, prediction_column_name]
+#     return s
+
+
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    if local_rank != 0:
-        # DDP non-rank-0 processes: just run train, evaluation on rank 0 only
-        train()
-    else:
-        train()
-        # Optional: run local evaluation after training
-        # from evaluate import evaluate_local
-        # evaluate_local(...)
+    # local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    # if local_rank != 0:
+    #     # DDP non-rank-0 processes: just run train, evaluation on rank 0 only
+    #     train()
+    # else:
+    #     train()
+    #     # Optional: run local evaluation after training
+    #     # from evaluate import evaluate_local
+    #     # evaluate_local(...)
+    
+    # device = "cuda" if torch.cuda.is_available() else "cpu"
+    # model = _load_model("resources").to(device).eval()
+    # print("Model loaded for inference.")
+    X_test = pd.read_pickle("data/X_test_reduced.pickle")
+    # dfs = [X_test[name] for name in X_test.keys()]
+    # y_pred = infer_batch_local(dfs, model, device, CACHE_DIR)
+    y_pred = infer(X_test, "resources", "example_id", "prediction")
+    y_pred.to_parquet("prediction/v12_predictions.parquet")
+    print("Inference complete. Predictions saved to prediction/v12_predictions.parquet.")

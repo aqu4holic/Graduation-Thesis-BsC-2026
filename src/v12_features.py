@@ -38,7 +38,7 @@ from scipy.spatial import cKDTree
 from scipy.stats import skew, kurtosis
 from tqdm.auto import tqdm
 
-# Must import before numpy forks to prevent BLAS deadlock
+# # Must import before numpy forks to prevent BLAS deadlock
 # os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 # os.environ.setdefault("OMP_NUM_THREADS", "1")
 
@@ -70,11 +70,15 @@ def _create_adjacency_label() -> dict:
         nx.DiGraph([("X", "Y"), ("Y", "v")]): "Consequence of Y",
         nx.DiGraph([("X", "Y")]): "Independent",
     }
+    nodelist = ["v", "X", "Y"]
     adjacency_label: dict = {}
     for g, label in graphs.items():
-        nodelist = ["v", "X", "Y"]
-        mat = nx.adjacency_matrix(g, nodelist=nodelist).todense()
-        key = tuple(np.array(mat).flatten())
+        g = g.copy()
+        for node in nodelist:
+            if node not in g:
+                g.add_node(node)
+        mat = nx.to_numpy_array(g, nodelist=nodelist)
+        key = tuple(mat.flatten())
         adjacency_label[key] = label
     return adjacency_label
 
@@ -457,6 +461,12 @@ def _build_one_graph(args: tuple) -> Optional[GraphData]:
         cols = list(df.columns)
         n = len(cols)
         data = df.values.astype(np.float32)
+        
+        # Normalize each variable to zero mean unit variance
+        std = data.std(axis=0, keepdims=True)
+        std[std < 1e-8] = 1.0
+        data = (data - data.mean(axis=0, keepdims=True)) / std
+        data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
 
         # 1. Kernel regression + ANM
         coeff_maps, resid_maps = compute_kernel_anm(data)
