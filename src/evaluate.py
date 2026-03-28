@@ -2,12 +2,14 @@
 """
 Parallelized local evaluation — node-level balanced accuracy.
 """
+from matplotlib.pylab import require
 import numpy as np
 import pandas as pd
 from sklearn.metrics import balanced_accuracy_score
 from concurrent.futures import ProcessPoolExecutor
 from tqdm.auto import tqdm
 import networkx as nx
+import argparse
 
 # %%
 # --- Graph utilities (must be top-level for pickling) ---
@@ -126,9 +128,20 @@ y_test = pd.read_pickle("data/y_test_reduced.pickle")
 # # %%
 # len(X_train), len(X_test)
 
+# read file name from arguments
+parser = argparse.ArgumentParser(description="A simple file reader")
+parser.add_argument(
+    "--pred_path",
+    type=str,
+    required=True,
+    # default="prediction/v12_predictions.parquet",
+    help="Path to the prediction parquet file",
+)
+args = parser.parse_args()
+
 # %%
 score = evaluate_predictions(
     X_test,
     y_test,
-    y_pred_path="prediction/v12_predictions.parquet",
+    y_pred_path=args.pred_path,
 )
