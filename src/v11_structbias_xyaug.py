@@ -1205,7 +1205,7 @@ def infer_batch_local(dfs, model, device="cpu", batch_size=32, cache_dir=None):
 
 
 def infer(X_test, model_directory_path, id_column_name, prediction_column_name):
-    path = os.path.join(model_directory_path, "model.pt")
+    path = os.path.join(model_directory_path, "model_v11_structbias_xyaug.pt")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = ADIAModel(d=D_MODEL, aug_noise_std=0.0)
     model.load_state_dict(torch.load(path, map_location=device, weights_only=True))
@@ -1245,42 +1245,46 @@ if __name__ == "__main__":
         exit(0)
 
     X_test = pd.read_pickle("data/X_test_reduced.pickle")
-    y_test = pd.read_pickle("data/y_test_reduced.pickle")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = ADIAModel(d=D_MODEL, aug_noise_std=0.0)
-    model.load_state_dict(torch.load("resources/model_v11_structbias_xyaug.pt", map_location=device, weights_only=True))
-    model.to(device).eval()
-    dfs = [X_test[n] for n in X_test]
-    names = list(X_test.keys())
-    adj_list = infer_batch_local(dfs, model, device=device, batch_size=64, cache_dir=LOCAL_CACHE_DIR)
-    adjacency_label = get_adjacency_label()
-    cc = {c: 0 for c in CLASS_NAMES}
-    ct = {c: 0 for c in CLASS_NAMES}
-    for name, A in zip(names, adj_list):
-        pl_ = get_labels(A, adjacency_label)
-        tl = get_labels(y_test[name], adjacency_label)
-        for v in tl:
-            ct[tl[v]] += 1
-            if pl_.get(v, "Independent") == tl[v]:
-                cc[tl[v]] += 1
-    print("\nPer-class accuracy:")
-    accs = []
-    for cls in CLASS_NAMES:
-        n = ct[cls]
-        acc = cc[cls] / n if n > 0 else 0.0
-        accs.append(acc)
-        print(f"  {cls:25s}: {acc:.4f}  (n={n})")
-    print(f"\nBalanced Accuracy: {np.mean(accs):.4f}")
+    # y_test = pd.read_pickle("data/y_test_reduced.pickle")
     
-    # Confusion analysis for Mediator
-    from collections import Counter
-    confusion = Counter()
-    for name, A in zip(names, adj_list):
-        pl_ = get_labels(A, adjacency_label)
-        tl = get_labels(y_test[name], adjacency_label)
-        for v in tl:
-            if tl[v] == "Mediator" and pl_.get(v, "Independent") != "Mediator":
-                confusion[pl_.get(v, "Independent")] += 1
-    print("\nMediator confused with:")
-    for cls, cnt in confusion.most_common():
-        print(f"  {cls}: {cnt}")
+    y_pred = infer(X_test, model_directory_path="resources", id_column_name="example_id", prediction_column_name="prediction")
+    y_pred.to_parquet("prediction/v11_structbias_xyaug.parquet", index=False)
+    
+    # device = "cuda" if torch.cuda.is_available() else "cpu"
+    # model = ADIAModel(d=D_MODEL, aug_noise_std=0.0)
+    # model.load_state_dict(torch.load("resources/model_v11_structbias_xyaug.pt", map_location=device, weights_only=True))
+    # model.to(device).eval()
+    # dfs = [X_test[n] for n in X_test]
+    # names = list(X_test.keys())
+    # adj_list = infer_batch_local(dfs, model, device=device, batch_size=64, cache_dir=LOCAL_CACHE_DIR)
+    # adjacency_label = get_adjacency_label()
+    # cc = {c: 0 for c in CLASS_NAMES}
+    # ct = {c: 0 for c in CLASS_NAMES}
+    # for name, A in zip(names, adj_list):
+    #     pl_ = get_labels(A, adjacency_label)
+    #     tl = get_labels(y_test[name], adjacency_label)
+    #     for v in tl:
+    #         ct[tl[v]] += 1
+    #         if pl_.get(v, "Independent") == tl[v]:
+    #             cc[tl[v]] += 1
+    # print("\nPer-class accuracy:")
+    # accs = []
+    # for cls in CLASS_NAMES:
+    #     n = ct[cls]
+    #     acc = cc[cls] / n if n > 0 else 0.0
+    #     accs.append(acc)
+    #     print(f"  {cls:25s}: {acc:.4f}  (n={n})")
+    # print(f"\nBalanced Accuracy: {np.mean(accs):.4f}")
+    
+    # # Confusion analysis for Mediator
+    # from collections import Counter
+    # confusion = Counter()
+    # for name, A in zip(names, adj_list):
+    #     pl_ = get_labels(A, adjacency_label)
+    #     tl = get_labels(y_test[name], adjacency_label)
+    #     for v in tl:
+    #         if tl[v] == "Mediator" and pl_.get(v, "Independent") != "Mediator":
+    #             confusion[pl_.get(v, "Independent")] += 1
+    # print("\nMediator confused with:")
+    # for cls, cnt in confusion.most_common():
+    #     print(f"  {cls}: {cnt}")

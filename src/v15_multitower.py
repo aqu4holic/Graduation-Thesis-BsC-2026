@@ -1,36 +1,45 @@
 """
-v14_noderich.py — v11 + Enriched Node Head + CI Features
+v15_multitower.py — Multi-Tower Architecture for Causal Role Classification
 
-Two targeted changes over v11 (v8b + structural attention bias):
+Architecture C: Two parallel towers with late fusion at the node head.
 
-1. RICHER NODE HEAD:
-   Old: gather 4 edges → MergeOperator(4×d → d) → Linear(d → 8)
-   New: gather 4 edges → stack as (4, d) → self-attention over 4 edges
-        → pairwise interaction features (products/differences)
-        → merge [attended, interactions, ci_features] → MLP → 8
+Tower 1 (from v14, pretrained):
+  8-channel conv1d → edge embeddings → self-attention with structural bias
+  → (B, E, d) edge embeddings capturing nonlinear functional relationships
 
-   WHY: Mediator requires jointly reasoning about X→v AND v→Y.
-   The old MergeOperator just concatenates — no explicit pairwise signal.
-   The new head lets v→X attend to X→v (direction evidence) and
-   v→X attend to v→Y (chain evidence for Mediator).
+Tower 2 (NEW):
+  Per-edge scalar statistics → MLP → (B, E, d) edge embeddings
+  Captures: partial correlation, pearson/spearman, R² asymmetry,
+  plus summary statistics of kernel coefficients and ANM residuals
+  (mean/std/skew — "free" features from existing preprocessing)
 
-2. CI FEATURES (10 per node):
-   Computed in preprocessing, injected at node head via MLP.
-   - CMI(v,X|Y), CMI(v,Y|X), CMI(X,Y|v)  — the 3 that define classes
-   - MI(v,X), MI(v,Y)                     — marginal dependence
-   - pcorr(v,X|rest), pcorr(v,Y|rest)     — conditional linear dependence
-   - corr(v,X), corr(v,Y)                 — marginal linear
-   - log(p)                               — graph dimension
+Fused Node Head:
+  For each node v, gather 4 edges from Tower 1 + 4 edges from Tower 2:
+    Step 1: Per-edge fusion — concat [t1_edge, t2_edge] → Linear → (d,)
+    Step 2: Self-attention over 4 fused edges (from v14's EnrichedNodeHead)
+    Step 3: Pairwise interaction products (6 pairs, from v14)
+    Step 4: CI features projection (from v14)
+    Step 5: Merge [pooled, interactions, ci_emb] → MLP → 8 classes
 
-Everything else (8ch conv, structural bias, edge head, shard training,
-XY aug, DDP) is identical to v11.
+Training:
+  Option A (default): End-to-end with differential LR
+    Tower 1: lr/10 (pretrained, fine-tune gently)
+    Tower 2 + FusedNodeHead: lr (train from scratch)
+
+  Option B (--staged): Two-stage
+    Stage 1: Freeze Tower 1, train Tower 2 + FusedNodeHead
+    Stage 2: Unfreeze all, fine-tune with low LR
 
 Usage:
-    # Base training
-    python v14_noderich.py
+    # Base training (end-to-end, load v14 checkpoint)
+    python v15_multitower.py --pretrained resources/v14_model.pt
 
-    # With XY augmentation (use pre-built shards)
-    python v14_noderich.py --xyaug --shard_dir dataset_cache/shards_v14/
+    # With XY augmentation shards
+    python v15_multitower.py --pretrained resources/v14_model.pt \\
+        --xyaug --shard_dir dataset_cache/shards_v15/
+
+    # Staged training
+    python v15_multitower.py --pretrained resources/v14_model.pt --staged
 """
 
 import typing
@@ -41,6 +50,7 @@ from tqdm.auto import tqdm
 
 import pandas as pd
 import numpy as np
+from scipy import stats as sp_stats
 from scipy.special import digamma
 from scipy.spatial import cKDTree
 
@@ -73,30 +83,35 @@ CLASS_NAMES = [
     "Independent",
 ]
 
-# === Channel config (same as v8b) ===
+# === Channel config (same as v8b/v14) ===
 BANDWIDTHS = [0.2, 0.5, 1.0]
 N_CHANNELS = 2 + len(BANDWIDTHS) + len(BANDWIDTHS)  # 8
 
-# === Structural bias (same as v11) ===
+# === Structural bias (same as v11/v14) ===
 N_STRUCT_BIAS_TYPES = 6
 
-# === CI features (NEW in v14) ===
+# === CI features (same as v14) ===
 N_NODE_CI_FEATURES = 10
 
+# === Edge scalar stats (NEW in v15) ===
+# 5 computed from raw data + 15 summarized from existing channels = 20
+N_EDGE_STATS = 20
+
 # === Training ===
-MAX_EPOCHS = 30
+MAX_EPOCHS = 40
 BATCH_SIZE = 64
 LR = 1e-3
+TOWER1_LR_SCALE = 0.1  # Tower 1 gets lr * 0.1
 AUG_NOISE_STD = 0.01
 
 LOCAL_CACHE_DIR = "dataset_cache/"
-CACHE_TAG = "v14"
+CACHE_TAG = "v15"
 
 IS_CLOUD_SUBMIT = False
 
 
 # ============================================================
-# Graph Utilities (unchanged)
+# Graph Utilities (unchanged from v14)
 # ============================================================
 def graph_nodes_representation(graph, nodelist):
     adjacency_matrix = nx.adjacency_matrix(graph, nodelist=nodelist).todense()
@@ -176,7 +191,7 @@ def _edge_type(u_name: str, v_name: str) -> int:
 
 
 # ============================================================
-# Feature Computation: Kernel Regression + ANM (from v8b)
+# Feature Computation: Kernel Regression + ANM (from v8b/v14)
 # ============================================================
 def compute_multivariate_kernel_coefficients(
     data: np.ndarray, n_sub: int = None, bandwidth: float = 0.5,
@@ -230,7 +245,7 @@ def compute_multivariate_kernel_coefficients(
 
 
 # ============================================================
-# Feature Computation: Node-level CI Features (NEW in v14)
+# Feature Computation: Node-level CI Features (from v14)
 # ============================================================
 def _knn_mi(x: np.ndarray, y: np.ndarray, k: int = 7) -> float:
     """KSG mutual information estimator."""
@@ -296,19 +311,12 @@ def _knn_cmi(x: np.ndarray, y: np.ndarray, z: np.ndarray, k: int = 7) -> float:
 
 
 def compute_node_ci_features(data: np.ndarray, cols: list) -> tuple:
-    """
-    Compute per-node CI features for all non-X/Y variables.
-
-    Returns:
-        node_features: (K, N_NODE_CI_FEATURES) float32
-        node_names: list of K variable names
-    """
+    """Compute per-node CI features for all non-X/Y variables. (from v14)"""
     N, p = data.shape
     col_idx = {name: i for i, name in enumerate(cols)}
     x_idx, y_idx = col_idx["X"], col_idx["Y"]
     x_data, y_data = data[:, x_idx], data[:, y_idx]
 
-    # Partial correlation matrix
     cov = np.cov(data.T)
     cov += 1e-6 * np.eye(p)
     try:
@@ -326,70 +334,149 @@ def compute_node_ci_features(data: np.ndarray, cols: list) -> tuple:
     for vi, v_name in enumerate(non_xy):
         v_i = col_idx[v_name]
         v_data = data[:, v_i]
-
-        features[vi, 0] = _knn_cmi(v_data, x_data, y_data)  # CMI(v,X|Y)
-        features[vi, 1] = _knn_cmi(v_data, y_data, x_data)  # CMI(v,Y|X)
-        features[vi, 2] = _knn_cmi(x_data, y_data, v_data)  # CMI(X,Y|v)
-        features[vi, 3] = _knn_mi(v_data, x_data)            # MI(v,X)
-        features[vi, 4] = _knn_mi(v_data, y_data)            # MI(v,Y)
-        features[vi, 5] = pcorr_matrix[v_i, x_idx]           # pcorr(v,X|rest)
-        features[vi, 6] = pcorr_matrix[v_i, y_idx]           # pcorr(v,Y|rest)
-
+        features[vi, 0] = _knn_cmi(v_data, x_data, y_data)
+        features[vi, 1] = _knn_cmi(v_data, y_data, x_data)
+        features[vi, 2] = _knn_cmi(x_data, y_data, v_data)
+        features[vi, 3] = _knn_mi(v_data, x_data)
+        features[vi, 4] = _knn_mi(v_data, y_data)
+        features[vi, 5] = pcorr_matrix[v_i, x_idx]
+        features[vi, 6] = pcorr_matrix[v_i, y_idx]
         cx = np.corrcoef(v_data, x_data)[0, 1]
         cy = np.corrcoef(v_data, y_data)[0, 1]
-        features[vi, 7] = cx if np.isfinite(cx) else 0.0     # corr(v,X)
-        features[vi, 8] = cy if np.isfinite(cy) else 0.0     # corr(v,Y)
-        features[vi, 9] = np.log(p)                           # log dim
+        features[vi, 7] = cx if np.isfinite(cx) else 0.0
+        features[vi, 8] = cy if np.isfinite(cy) else 0.0
+        features[vi, 9] = np.log(p)
 
     return features, non_xy
 
 
 # ============================================================
-# Structural Bias (matched exactly to v11)
+# NEW in v15: Per-Edge Scalar Statistics
+# ============================================================
+def compute_edge_scalar_stats(
+    data: np.ndarray, cols: list,
+    coeff_maps: list, resid_maps: list,
+) -> np.ndarray:
+    """
+    Compute per-edge scalar features for Tower 2.
+
+    Returns: (E, N_EDGE_STATS) float32  where E = p*(p-1)
+
+    Features per edge (i→j):
+      [0]  partial_corr(i,j)     — from precision matrix
+      [1]  pearson(i,j)
+      [2]  spearman(i,j)
+      [3]  R²_forward (i→j)     — linear R² predicting j from i
+      [4]  R²_reverse (j→i)     — linear R² predicting i from j
+      --- Curve summary stats (from existing kernel/ANM channels) ---
+      [5-7]   kernel_coeff_mean at bw 0.2, 0.5, 1.0
+      [8-10]  kernel_coeff_std at bw 0.2, 0.5, 1.0
+      [11-13] anm_resid_mean at bw 0.2, 0.5, 1.0
+      [14-16] anm_resid_std at bw 0.2, 0.5, 1.0
+      [17-19] anm_resid_skew at bw 0.2, 0.5, 1.0
+    """
+    N, p = data.shape
+
+    # Partial correlation via precision matrix
+    cov = np.cov(data.T)
+    cov += 1e-6 * np.eye(p)
+    try:
+        precision = np.linalg.inv(cov)
+    except np.linalg.LinAlgError:
+        precision = np.eye(p)
+    diag = np.sqrt(np.maximum(np.diag(precision), 1e-10))
+    pcorr = -precision / np.outer(diag, diag)
+    np.fill_diagonal(pcorr, 0.0)
+
+    edge_stats: list = []
+
+    for i in range(p):
+        xi = data[:, i]
+        for j in range(p):
+            if i == j:
+                continue
+            xj = data[:, j]
+            stats = np.zeros(N_EDGE_STATS, dtype=np.float32)
+
+            # [0] Partial correlation
+            stats[0] = pcorr[i, j]
+
+            # [1] Pearson
+            if np.var(xi) > 1e-10 and np.var(xj) > 1e-10:
+                pc = np.corrcoef(xi, xj)[0, 1]
+                stats[1] = pc if np.isfinite(pc) else 0.0
+
+            # [2] Spearman
+            if np.var(xi) > 1e-10 and np.var(xj) > 1e-10:
+                sc, _ = sp_stats.spearmanr(xi, xj)
+                stats[2] = sc if np.isfinite(sc) else 0.0
+
+            # [3] R² forward (i predicts j)
+            if np.var(xi) > 1e-10:
+                beta = np.cov(xi, xj)[0, 1] / np.var(xi)
+                resid = xj - beta * xi
+                ss_res = np.sum(resid ** 2)
+                ss_tot = np.sum((xj - xj.mean()) ** 2) + 1e-10
+                stats[3] = max(1.0 - ss_res / ss_tot, 0.0)
+
+            # [4] R² reverse (j predicts i)
+            if np.var(xj) > 1e-10:
+                beta = np.cov(xi, xj)[0, 1] / np.var(xj)
+                resid = xi - beta * xj
+                ss_res = np.sum(resid ** 2)
+                ss_tot = np.sum((xi - xi.mean()) ** 2) + 1e-10
+                stats[4] = max(1.0 - ss_res / ss_tot, 0.0)
+
+            # [5-19] Curve summary stats from kernel coeffs and ANM residuals
+            for bw_idx in range(len(BANDWIDTHS)):
+                # Kernel coefficient for edge (i→j) at this bandwidth
+                kc = coeff_maps[bw_idx].get((i, j))
+                if kc is not None:
+                    stats[5 + bw_idx] = np.mean(kc)
+                    stats[8 + bw_idx] = np.std(kc)
+
+                # ANM residual for target j at this bandwidth
+                ar = resid_maps[bw_idx].get(j)
+                if ar is not None:
+                    stats[11 + bw_idx] = np.mean(ar)
+                    stats[14 + bw_idx] = np.std(ar)
+                    # Skew — use scipy for safety, clip to [-10, 10]
+                    sk = sp_stats.skew(ar)
+                    stats[17 + bw_idx] = np.clip(sk, -10.0, 10.0) if np.isfinite(sk) else 0.0
+
+            edge_stats.append(stats)
+
+    result = np.stack(edge_stats, axis=0).astype(np.float32)  # (E, N_EDGE_STATS)
+    np.nan_to_num(result, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    np.clip(result, -50.0, 50.0, out=result)  # hard clamp all features
+    return result
+
+
+# ============================================================
+# Structural Bias (from v11/v14)
 # ============================================================
 def build_struct_rel_matrix(p: int) -> np.ndarray:
-    """
-    Build structural relationship matrix between all edge pairs.
-
-    Edge ordering: for u in range(p), for v in range(p), if u!=v.
-
-    Types:
-      0: Reverse pair     (u1=v2 AND v1=u2)
-      1: Shared source    (u1=u2, not reverse)
-      2: Shared target    (v1=v2, not reverse)
-      3: Forward chain    (v1=u2, not reverse)
-      4: Backward chain   (u1=v2, not reverse)
-      5: Unrelated
-
-    Returns: (E, E) int64 array where E = p*(p-1)
-    """
     E: int = p * (p - 1)
-
     edge_uv: list = []
     for u in range(p):
         for v in range(p):
             if u != v:
                 edge_uv.append((u, v))
-
-    rel: np.ndarray = np.full((E, E), 5, dtype=np.int64)  # default: unrelated
-
+    rel: np.ndarray = np.full((E, E), 5, dtype=np.int64)
     for e1 in range(E):
         u1, v1 = edge_uv[e1]
         for e2 in range(E):
             u2, v2 = edge_uv[e2]
-
             if u1 == v2 and v1 == u2:
-                rel[e1, e2] = 0  # reverse pair
+                rel[e1, e2] = 0
             elif u1 == u2:
-                rel[e1, e2] = 1  # shared source
+                rel[e1, e2] = 1
             elif v1 == v2:
-                rel[e1, e2] = 2  # shared target
+                rel[e1, e2] = 2
             elif v1 == u2:
-                rel[e1, e2] = 3  # forward chain
+                rel[e1, e2] = 3
             elif u1 == v2:
-                rel[e1, e2] = 4  # backward chain
-            # else: 5 (unrelated, already set)
-
+                rel[e1, e2] = 4
     return rel
 
 
@@ -404,12 +491,13 @@ def get_struct_rel_matrix(p: int) -> np.ndarray:
 
 
 # ============================================================
-# Data Preprocessing
+# Data Preprocessing (extended for v15)
 # ============================================================
 def build_edge_tensor(df: pd.DataFrame) -> tuple:
     """
-    Build 8-channel edge tensor + node CI features.
-    Returns: edge_data, edge_types, node_ci_features, node_names
+    Build edge tensors + scalar stats + node CI features.
+
+    Returns: edge_data, edge_types, edge_stats, node_ci, node_names
     """
     cols = list(df.columns)
     p = len(cols)
@@ -417,17 +505,22 @@ def build_edge_tensor(df: pd.DataFrame) -> tuple:
     N = data.shape[0]
 
     # Kernel regression + ANM at each bandwidth
-    coeff_maps, resid_maps = [], []
+    coeff_maps: list = []
+    resid_maps: list = []
     for bw in BANDWIDTHS:
         cm, rm = compute_multivariate_kernel_coefficients(data, bandwidth=bw)
         coeff_maps.append(cm)
         resid_maps.append(rm)
 
-    # Node CI features
+    # Node CI features (from v14)
     node_ci, node_names = compute_node_ci_features(data.astype(np.float64), cols)
 
-    # Build edge tensors
-    edges, edge_types_list = [], []
+    # NEW: Per-edge scalar statistics for Tower 2
+    edge_stats = compute_edge_scalar_stats(data, cols, coeff_maps, resid_maps)
+
+    # Build edge tensors (same as v14)
+    edges: list = []
+    edge_types_list: list = []
     for i, u_name in enumerate(cols):
         sort_idx = np.argsort(data[:, i])
         u_sorted = data[sort_idx, i]
@@ -443,26 +536,28 @@ def build_edge_tensor(df: pd.DataFrame) -> tuple:
             edges.append(np.stack(channels, axis=0))
             edge_types_list.append(_edge_type(u_name, v_name))
 
-    edge_data = np.stack(edges, axis=0).astype(np.float32)
-    edge_types = np.array(edge_types_list, dtype=np.int64)
-    return edge_data, edge_types, node_ci, node_names
+    edge_data: np.ndarray = np.stack(edges, axis=0).astype(np.float32)
+    edge_types: np.ndarray = np.array(edge_types_list, dtype=np.int64)
+    return edge_data, edge_types, edge_stats, node_ci, node_names
 
 
 def _build_single(args):
     df, y_df = args
-    edge_data, edge_types, node_ci, node_names = build_edge_tensor(df)
+    edge_data, edge_types, edge_stats, node_ci, node_names = build_edge_tensor(df)
     cols = list(df.columns)
     p = len(cols)
     result = {
         "edge_data": edge_data, "edge_types": edge_types,
+        "edge_stats": edge_stats,  # NEW in v15
         "node_ci": node_ci, "node_names": node_names,
         "cols": cols, "p": p,
     }
     if y_df is not None:
         adj_np = y_df.values.astype(np.float32)
         adj_cols = list(y_df.columns)
-        result["adj"] = adj_np; result["adj_cols"] = adj_cols
-        edge_labels = []
+        result["adj"] = adj_np
+        result["adj_cols"] = adj_cols
+        edge_labels: list = []
         for i in range(p):
             for j in range(p):
                 if i != j:
@@ -497,15 +592,15 @@ def collate_fn(batch):
     edge_data = torch.zeros(B, max_E, C, N)
     edge_types = torch.zeros(B, max_E, dtype=torch.long)
     edge_mask = torch.zeros(B, max_E, dtype=torch.bool)
+    edge_stats = torch.zeros(B, max_E, N_EDGE_STATS)  # NEW
     node_ci = torch.zeros(B, max_K, N_NODE_CI_FEATURES)
     node_mask = torch.zeros(B, max_K, dtype=torch.bool)
-    # Default to type 5 (unrelated) for padding — matches v11
     struct_rel = torch.full((B, max_E, max_E), 5, dtype=torch.long)
 
     has_labels = False
     edge_labels = torch.zeros(B, max_E, dtype=torch.long)
     node_labels = torch.zeros(B, max_K, dtype=torch.long)
-    cols_list = []
+    cols_list: list = []
 
     for b, item in enumerate(batch):
         E = item["edge_data"].shape[0]
@@ -513,11 +608,11 @@ def collate_fn(batch):
         edge_data[b, :E] = torch.from_numpy(item["edge_data"])
         edge_types[b, :E] = torch.from_numpy(item["edge_types"])
         edge_mask[b, :E] = True
+        edge_stats[b, :E] = torch.from_numpy(item["edge_stats"])  # NEW
         node_ci[b, :K] = torch.from_numpy(item["node_ci"])
         node_mask[b, :K] = True
         cols_list.append(item["cols"])
 
-        # Build struct_rel from cache (not stored per item) — matches v11
         p = item["p"]
         rel_mat = get_struct_rel_matrix(p)
         struct_rel[b, :E, :E] = torch.from_numpy(rel_mat)
@@ -527,10 +622,13 @@ def collate_fn(batch):
             edge_labels[b, :E] = torch.from_numpy(item["edge_labels"])
             node_labels[b, :K] = torch.from_numpy(item["node_labels"])
 
-    out = {"edge_data": edge_data, "edge_types": edge_types,
-           "edge_mask": edge_mask, "node_ci": node_ci, "node_mask": node_mask,
-           "struct_rel": struct_rel, "cols": cols_list,
-           "_keys": [item.get("_key") for item in batch]}
+    out = {
+        "edge_data": edge_data, "edge_types": edge_types,
+        "edge_mask": edge_mask, "edge_stats": edge_stats,
+        "node_ci": node_ci, "node_mask": node_mask,
+        "struct_rel": struct_rel, "cols": cols_list,
+        "_keys": [item.get("_key") for item in batch],
+    }
     if has_labels:
         out["edge_labels"] = edge_labels
         out["node_labels"] = node_labels
@@ -539,7 +637,7 @@ def collate_fn(batch):
 
 
 # ============================================================
-# Model Components (shared with v8b/v11)
+# Model Components (shared with v14)
 # ============================================================
 class ConvBlock(nn.Module):
     def __init__(self, d, kernel_size=3, n_groups=8):
@@ -581,7 +679,6 @@ class EdgeFeatureExtractor(nn.Module):
 
 
 class SelfAttentionWithBias(nn.Module):
-    """Self-attention with learned structural bias (matched to v11)."""
     def __init__(self, d=64, n_heads=4, n_bias_types=N_STRUCT_BIAS_TYPES):
         super().__init__()
         self.d = d
@@ -593,7 +690,7 @@ class SelfAttentionWithBias(nn.Module):
         self.v_proj = nn.Linear(d, d)
         self.out_proj = nn.Linear(d, d)
         self.struct_bias = nn.Embedding(n_bias_types, n_heads)
-        nn.init.zeros_(self.struct_bias.weight)  # start neutral
+        nn.init.zeros_(self.struct_bias.weight)
         self.norm1 = nn.LayerNorm(d)
         self.ff = nn.Sequential(nn.Linear(d, 4*d), nn.GELU(), nn.Linear(4*d, d))
         self.norm2 = nn.LayerNorm(d)
@@ -621,11 +718,7 @@ class SelfAttentionWithBias(nn.Module):
         return x
 
 
-# ============================================================
-# NEW: Enriched Node Head
-# ============================================================
 class NodeCIProjector(nn.Module):
-    """Project per-node CI scalars → d-dim."""
     def __init__(self, n_feat, d):
         super().__init__()
         self.proj = nn.Sequential(
@@ -636,132 +729,249 @@ class NodeCIProjector(nn.Module):
         return self.proj(x)
 
 
-class EnrichedNodeHead(nn.Module):
+# ============================================================
+# NEW: Tower 2 — Scalar Statistics Tower
+# ============================================================
+class ScalarStatTower(nn.Module):
     """
-    Richer node classification head.
+    Tower 2: Projects per-edge scalar statistics → edge embeddings.
 
-    Old: MergeOperator([e_vx, e_vy, e_xv, e_yv]) → Linear(8)
-    New:
-      1. Stack 4 edges as (4, d) → 1-layer self-attention → (4, d)
-      2. Pairwise interactions: 6 element-wise products between all pairs
-         → Linear(6d → d)  (captures direction asymmetry, chain evidence, etc.)
-      3. Pooled attended edges: mean of 4 attended edges → (d,)
-      4. CI features: MLP(10 → d) → (d,)
+    Input:  (B, E, N_EDGE_STATS) — 20 scalar features per edge
+    Output: (B, E, d) — edge embeddings from scalar signal
+
+    Uses deeper MLP than a simple projector because these features
+    are heterogeneous (correlations, R², summary stats) and need
+    nonlinear transformations to be useful.
+    """
+    def __init__(self, n_stats: int = N_EDGE_STATS, d: int = D_MODEL):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(n_stats, 4 * d),
+            nn.GELU(),
+            nn.Dropout(0.05),
+            nn.Linear(4 * d, 2 * d),
+            nn.GELU(),
+            nn.Linear(2 * d, d),
+            nn.LayerNorm(d),
+        )
+
+    def forward(self, edge_stats: torch.Tensor) -> torch.Tensor:
+        return self.mlp(edge_stats)
+
+
+# ============================================================
+# NEW: Fused Node Head (replaces EnrichedNodeHead)
+# ============================================================
+class FusedNodeHead(nn.Module):
+    """
+    Late-fusion node classification head combining Tower 1 + Tower 2.
+
+    For each node v, gathers 4 edges from each tower:
+      Tower 1: e1_vx, e1_vy, e1_xv, e1_yv  (conv1d edge embeddings)
+      Tower 2: e2_vx, e2_vy, e2_xv, e2_yv  (scalar stat embeddings)
+
+    Pipeline:
+      1. Per-edge fusion: concat [t1, t2] → Linear(2d → d) per edge position
+      2. Self-attention over 4 fused edges → pooled (d,)
+      3. Pairwise interaction products (6 pairs) → Linear(6d → d)
+      4. CI feature projection → (d,)
       5. Merge [pooled, interactions, ci_emb] → MLP → 8 classes
     """
-    def __init__(self, d=64, n_ci_features=N_NODE_CI_FEATURES):
+    def __init__(self, d: int = D_MODEL, n_ci_features: int = N_NODE_CI_FEATURES):
         super().__init__()
         self.d = d
 
-        # Self-attention over the 4 edges
+        # Step 1: Per-edge fusion (Tower 1 + Tower 2 → fused)
+        self.edge_fuse = nn.Sequential(
+            nn.Linear(2 * d, d),
+            nn.LayerNorm(d),
+            nn.GELU(),
+        )
+
+        # Step 2: Self-attention over 4 fused edges
         self.edge_attn = nn.MultiheadAttention(d, num_heads=4, batch_first=True)
         self.edge_attn_norm = nn.LayerNorm(d)
 
-        # Pairwise interaction projection
-        # 6 pairs: (vx,vy), (vx,xv), (vx,yv), (vy,xv), (vy,yv), (xv,yv)
+        # Step 3: Pairwise interaction projection
         self.interaction_proj = nn.Sequential(
             nn.Linear(6 * d, 2 * d), nn.GELU(),
             nn.Linear(2 * d, d), nn.LayerNorm(d),
         )
 
-        # CI features projector
+        # Step 4: CI features
         self.ci_proj = NodeCIProjector(n_ci_features, d)
 
-        # Final merge: pooled + interactions + ci → classification
+        # Step 5: Final merge + classifier
         self.merge = MergeOperator(n_inputs=3, d=d)
         self.classifier = nn.Sequential(
             nn.Linear(d, d), nn.GELU(), nn.Dropout(0.1),
             nn.Linear(d, N_CLASSES),
         )
 
-    def forward(self, e_vx, e_vy, e_xv, e_yv, ci_features):
-        """
-        e_vx, e_vy, e_xv, e_yv: (d,) each — gathered edge embeddings
-        ci_features: (n_ci,) — CI scalar features for this node
-        Returns: (N_CLASSES,) logits
-        """
-        # 1. Self-attention over 4 edges
-        edges = torch.stack([e_vx, e_vy, e_xv, e_yv], dim=0).unsqueeze(0)  # (1, 4, d)
+    def forward(
+        self,
+        t1_vx: torch.Tensor, t1_vy: torch.Tensor,
+        t1_xv: torch.Tensor, t1_yv: torch.Tensor,
+        t2_vx: torch.Tensor, t2_vy: torch.Tensor,
+        t2_xv: torch.Tensor, t2_yv: torch.Tensor,
+        ci_features: torch.Tensor,
+    ) -> torch.Tensor:
+        """All edge tensors are (d,). ci_features is (n_ci,). Returns (N_CLASSES,)."""
+
+        # Step 1: Per-edge fusion
+        f_vx = self.edge_fuse(torch.cat([t1_vx, t2_vx], dim=-1))
+        f_vy = self.edge_fuse(torch.cat([t1_vy, t2_vy], dim=-1))
+        f_xv = self.edge_fuse(torch.cat([t1_xv, t2_xv], dim=-1))
+        f_yv = self.edge_fuse(torch.cat([t1_yv, t2_yv], dim=-1))
+
+        # Step 2: Self-attention over 4 fused edges
+        edges = torch.stack([f_vx, f_vy, f_xv, f_yv], dim=0).unsqueeze(0)  # (1, 4, d)
         attended, _ = self.edge_attn(edges, edges, edges)
-        attended = self.edge_attn_norm(edges + attended)  # (1, 4, d)
+        attended = self.edge_attn_norm(edges + attended)
         pooled = attended.squeeze(0).mean(dim=0)  # (d,)
 
-        # 2. Pairwise interactions (element-wise product)
+        # Step 3: Pairwise interactions (element-wise product on FUSED edges)
         interactions = torch.cat([
-            e_vx * e_vy,   # both connect v to X/Y — confounder/collider signal
-            e_vx * e_xv,   # v→X vs X→v — direction asymmetry for X
-            e_vx * e_yv,   # v→X vs Y→v — cross signal
-            e_vy * e_xv,   # v→Y vs X→v — cross signal
-            e_vy * e_yv,   # v→Y vs Y→v — direction asymmetry for Y
-            e_xv * e_yv,   # X→v vs Y→v — both point to v → collider signal
-        ], dim=-1)  # (6d,)
-        interaction_emb = self.interaction_proj(interactions)  # (d,)
+            f_vx * f_vy,   # confounder/collider signal
+            f_vx * f_xv,   # direction asymmetry for X
+            f_vx * f_yv,   # cross signal
+            f_vy * f_xv,   # cross signal
+            f_vy * f_yv,   # direction asymmetry for Y
+            f_xv * f_yv,   # both point to v → collider
+        ], dim=-1)
+        interaction_emb = self.interaction_proj(interactions)
 
-        # 3. CI features
-        ci_emb = self.ci_proj(ci_features)  # (d,)
+        # Step 4: CI features
+        ci_emb = self.ci_proj(ci_features)
 
-        # 4. Merge + classify
+        # Step 5: Merge + classify
         merged = self.merge([pooled, interaction_emb, ci_emb])
         return self.classifier(merged)
 
 
 # ============================================================
-# Full Model
+# Full Multi-Tower Model
 # ============================================================
-class ADIAModel(nn.Module):
+class ADIAMultiTowerModel(nn.Module):
     """
-    v14: v8b channels + v11 structural bias + enriched node head + CI features.
+    v15: Multi-tower architecture.
 
-    Pipeline:
-      1. EdgeFeatureExtractor: (B,E,8,N) → (B,E,d)
-      2. Merge [conv, type_emb] → (B,E,d)
-      3. 2× SelfAttentionWithBias (structural bias from v11)
-      4. Edge head: (B,E,d) → (B,E,2)
-      5. EnrichedNodeHead: 4 edges + CI features → 8-class
+    Tower 1 (pretrained from v14):
+      EdgeFeatureExtractor → Merge[conv, type_emb] → 2× SelfAttentionWithBias
+      → (B, E, d) conv edge embeddings
+
+    Tower 2 (NEW, trained from scratch):
+      ScalarStatTower: (B, E, N_EDGE_STATS) → (B, E, d) stat edge embeddings
+
+    Edge head: from Tower 1 only (unchanged)
+    Node head: FusedNodeHead (gathers from both towers + CI features)
     """
-    def __init__(self, d=None, n_edge_types=None, aug_noise_std=AUG_NOISE_STD):
+    def __init__(self, d: int = None, n_edge_types: int = None,
+                 aug_noise_std: float = AUG_NOISE_STD):
         super().__init__()
         d = d or D_MODEL
         n_edge_types = n_edge_types or N_EDGE_TYPES
         self.d = d
         self.aug_noise_std = aug_noise_std
 
+        # === Tower 1: Conv edge features (from v14) ===
         self.extractor = EdgeFeatureExtractor(d, n_blocks=5)
         self.edge_type_emb = nn.Embedding(n_edge_types, d)
         self.edge_merge = MergeOperator(n_inputs=2, d=d)
         self.attn_layers = nn.ModuleList([
             SelfAttentionWithBias(d, n_heads=4) for _ in range(2)
         ])
-        self.edge_head = nn.Linear(d, 2)
-        self.node_head = EnrichedNodeHead(d, N_NODE_CI_FEATURES)
 
-    def forward(self, edge_data, edge_types, edge_mask, cols_list,
-                node_ci=None, struct_rel=None):
+        # === Tower 2: Scalar statistics (NEW) ===
+        self.stat_tower = ScalarStatTower(N_EDGE_STATS, d)
+
+        # === Edge head (from Tower 1 only) ===
+        self.edge_head = nn.Linear(d, 2)
+
+        # === Fused Node Head (NEW) ===
+        self.node_head = FusedNodeHead(d, N_NODE_CI_FEATURES)
+
+    def load_tower1_from_v14(self, v14_state_dict: dict) -> None:
+        """
+        Load Tower 1 weights from a v14 checkpoint.
+
+        Maps v14 keys to v15 Tower 1 keys (they're identical for these modules).
+        The v14 node head (EnrichedNodeHead) is NOT loaded — we use FusedNodeHead.
+        """
+        tower1_prefixes = [
+            "extractor.", "edge_type_emb.", "edge_merge.",
+            "attn_layers.", "edge_head.",
+        ]
+        loaded: int = 0
+        skipped: int = 0
+        own_state = self.state_dict()
+
+        for key, val in v14_state_dict.items():
+            if any(key.startswith(pfx) for pfx in tower1_prefixes):
+                if key in own_state and own_state[key].shape == val.shape:
+                    own_state[key] = val
+                    loaded += 1
+                else:
+                    skipped += 1
+                    print(f"  [SKIP] {key} — shape mismatch or not in model")
+            else:
+                skipped += 1  # node_head weights from v14 — don't load
+
+        self.load_state_dict(own_state, strict=False)
+        print(f"  Loaded {loaded} Tower 1 params from v14, skipped {skipped}")
+
+    def tower1_parameters(self):
+        """Parameters belonging to Tower 1 (for differential LR)."""
+        t1_modules = [self.extractor, self.edge_type_emb,
+                      self.edge_merge, self.attn_layers, self.edge_head]
+        for m in t1_modules:
+            yield from m.parameters()
+
+    def tower2_and_head_parameters(self):
+        """Parameters belonging to Tower 2 + FusedNodeHead (for higher LR)."""
+        t2_modules = [self.stat_tower, self.node_head]
+        for m in t2_modules:
+            yield from m.parameters()
+
+    def forward(
+        self,
+        edge_data: torch.Tensor, edge_types: torch.Tensor,
+        edge_mask: torch.Tensor, cols_list: list,
+        edge_stats: torch.Tensor = None,
+        node_ci: torch.Tensor = None,
+        struct_rel: torch.Tensor = None,
+    ):
         B, E, C, N = edge_data.shape
 
         if self.training and self.aug_noise_std > 0:
             edge_data = edge_data + torch.randn_like(edge_data) * self.aug_noise_std
 
-        # Edge feature extraction + merge
-        edge_emb = self.extractor(edge_data.view(B*E, C, N)).view(B, E, self.d)
+        # === Tower 1: Conv path ===
+        t1_emb = self.extractor(edge_data.view(B*E, C, N)).view(B, E, self.d)
         type_emb = self.edge_type_emb(edge_types)
-        edge_emb = self.edge_merge([edge_emb, type_emb])
+        t1_emb = self.edge_merge([t1_emb, type_emb])
 
-        # Self-attention with structural bias
         pad_mask = ~edge_mask
         for attn in self.attn_layers:
-            edge_emb = attn(edge_emb, struct_rel=struct_rel, key_padding_mask=pad_mask)
+            t1_emb = attn(t1_emb, struct_rel=struct_rel, key_padding_mask=pad_mask)
 
-        # Edge head
-        edge_logits = self.edge_head(edge_emb)
+        # === Tower 2: Scalar stats path ===
+        if edge_stats is not None:
+            edge_stats = torch.nan_to_num(edge_stats, nan=0.0, posinf=0.0, neginf=0.0)
+            t2_emb = self.stat_tower(edge_stats)  # (B, E, d)
+        else:
+            t2_emb = torch.zeros_like(t1_emb)
 
-        # Node head with enriched processing
-        node_logits_list = []
+        # === Edge head (Tower 1 only) ===
+        edge_logits = self.edge_head(t1_emb)
+
+        # === Fused Node Head ===
+        node_logits_list: list = []
         for b in range(B):
             cols = cols_list[b]
             p = len(cols)
             col_idx = {name: i for i, name in enumerate(cols)}
-            edge_order = {}
+            edge_order: dict = {}
             count = 0
             for ui in range(p):
                 for vi in range(p):
@@ -770,28 +980,39 @@ class ADIAModel(nn.Module):
                         count += 1
 
             x_idx, y_idx = col_idx.get("X"), col_idx.get("Y")
-            embs = edge_emb[b]
             other_nodes = [n for n in cols if n not in ("X", "Y")]
 
             if not other_nodes or x_idx is None or y_idx is None:
                 node_logits_list.append(None)
                 continue
 
-            node_logits = []
+            node_logits: list = []
             for vi, node_name in enumerate(other_nodes):
                 u = col_idx[node_name]
-                e_vx = embs[edge_order[(u, x_idx)]]
-                e_vy = embs[edge_order[(u, y_idx)]]
-                e_xv = embs[edge_order[(x_idx, u)]]
-                e_yv = embs[edge_order[(y_idx, u)]]
+
+                # Gather Tower 1 edges
+                t1_vx = t1_emb[b, edge_order[(u, x_idx)]]
+                t1_vy = t1_emb[b, edge_order[(u, y_idx)]]
+                t1_xv = t1_emb[b, edge_order[(x_idx, u)]]
+                t1_yv = t1_emb[b, edge_order[(y_idx, u)]]
+
+                # Gather Tower 2 edges
+                t2_vx = t2_emb[b, edge_order[(u, x_idx)]]
+                t2_vy = t2_emb[b, edge_order[(u, y_idx)]]
+                t2_xv = t2_emb[b, edge_order[(x_idx, u)]]
+                t2_yv = t2_emb[b, edge_order[(y_idx, u)]]
 
                 # CI features for this node
                 if node_ci is not None and vi < node_ci.shape[1]:
                     ci = node_ci[b, vi]
                 else:
-                    ci = torch.zeros(N_NODE_CI_FEATURES, device=embs.device)
+                    ci = torch.zeros(N_NODE_CI_FEATURES, device=t1_emb.device)
 
-                logits = self.node_head(e_vx, e_vy, e_xv, e_yv, ci)
+                logits = self.node_head(
+                    t1_vx, t1_vy, t1_xv, t1_yv,
+                    t2_vx, t2_vy, t2_xv, t2_yv,
+                    ci,
+                )
                 node_logits.append(logits)
 
             node_logits_list.append(
@@ -802,13 +1023,18 @@ class ADIAModel(nn.Module):
 
 
 # ============================================================
-# Lightning Module
+# Lightning Module (updated for differential LR)
 # ============================================================
 class ADIALightningModule(pl.LightningModule):
-    def __init__(self, class_weights=None, lr=LR):
+    def __init__(self, class_weights=None, lr=LR, tower1_lr_scale=TOWER1_LR_SCALE,
+                 tower1_pretrained=False, freeze_tower1_epochs=0):
         super().__init__()
-        self.model = ADIAModel()
+        self.model = ADIAMultiTowerModel()
         self.lr = lr
+        self.tower1_lr_scale = tower1_lr_scale
+        self.tower1_pretrained = tower1_pretrained
+        self.freeze_tower1_epochs = freeze_tower1_epochs  # freeze Tower 1 for N epochs
+        self._tower1_frozen = False
         if class_weights is not None:
             self.register_buffer("edge_w", torch.ones(2))
             self.register_buffer("node_w", torch.tensor(class_weights, dtype=torch.float32))
@@ -816,10 +1042,35 @@ class ADIALightningModule(pl.LightningModule):
             self.register_buffer("edge_w", torch.ones(2))
             self.register_buffer("node_w", torch.ones(N_CLASSES))
 
+    def _freeze_tower1(self):
+        for p in self.model.tower1_parameters():
+            p.requires_grad = False
+        self._tower1_frozen = True
+        print("[v15] Tower 1 FROZEN")
+
+    def _unfreeze_tower1(self):
+        for p in self.model.tower1_parameters():
+            p.requires_grad = True
+        self._tower1_frozen = False
+        print("[v15] Tower 1 UNFROZEN")
+
+    def on_train_start(self):
+        # Freeze Tower 1 at the beginning if requested
+        if self.tower1_pretrained and self.freeze_tower1_epochs > 0:
+            self._freeze_tower1()
+
+    def on_train_epoch_start(self):
+        # Unfreeze Tower 1 after freeze_tower1_epochs
+        if (self._tower1_frozen
+                and self.current_epoch >= self.freeze_tower1_epochs):
+            self._unfreeze_tower1()
+
     def forward(self, batch):
         return self.model(
             batch["edge_data"], batch["edge_types"], batch["edge_mask"],
-            batch["cols"], node_ci=batch.get("node_ci"),
+            batch["cols"],
+            edge_stats=batch.get("edge_stats"),
+            node_ci=batch.get("node_ci"),
             struct_rel=batch.get("struct_rel"),
         )
 
@@ -827,7 +1078,7 @@ class ADIALightningModule(pl.LightningModule):
         edge_logits, node_logits_list = self(batch)
         B = len(node_logits_list)
 
-        # Edge loss
+        # Edge loss (Tower 1)
         edge_mask = batch["edge_mask"]
         edge_labels = batch["edge_labels"]
         valid = edge_mask.view(-1)
@@ -836,7 +1087,7 @@ class ADIALightningModule(pl.LightningModule):
             edge_labels.view(-1)[valid],
         )
 
-        # Node loss
+        # Node loss (fused)
         all_nl, all_lab = [], []
         for b in range(B):
             nl = node_logits_list[b]
@@ -868,19 +1119,67 @@ class ADIALightningModule(pl.LightningModule):
         return total
 
     def training_step(self, batch, batch_idx):
-        return self._compute_loss(batch, "train")
+        edge_logits, node_logits_list = self(batch)
+        B = len(node_logits_list)
+
+        # Edge loss
+        edge_mask = batch["edge_mask"]
+        edge_labels = batch["edge_labels"]
+        valid = edge_mask.view(-1)
+        edge_loss = F.cross_entropy(
+            edge_logits.view(-1, 2)[valid],
+            edge_labels.view(-1)[valid],
+        )
+
+        # Node loss + accuracy
+        all_nl, all_lab = [], []
+        for b in range(B):
+            nl = node_logits_list[b]
+            if nl is None:
+                continue
+            K = nl.shape[0]
+            all_nl.append(nl)
+            all_lab.append(batch["node_labels"][b, :K])
+
+        if all_nl:
+            all_nl = torch.cat(all_nl)
+            all_lab = torch.cat(all_lab)
+            node_loss = F.cross_entropy(all_nl, all_lab, weight=self.node_w)
+            preds = all_nl.argmax(-1)
+            acc = (preds == all_lab).float().mean()
+            self.log("train_acc", acc, prog_bar=True, batch_size=B)
+
+            # Log unique predictions to detect class collapse
+            n_unique = len(preds.unique())
+            self.log("train_n_unique_preds", float(n_unique), prog_bar=True, batch_size=B)
+        else:
+            node_loss = torch.tensor(0.0, device=self.device)
+
+        total = edge_loss + node_loss
+        self.log("train_loss", total, prog_bar=True, batch_size=B)
+        self.log("train_edge_loss", edge_loss, batch_size=B)
+        self.log("train_node_loss", node_loss, batch_size=B)
+        return total
 
     def validation_step(self, batch, batch_idx):
         return self._compute_loss(batch, "val")
 
     def configure_optimizers(self):
-        opt = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=0.01)
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=MAX_EPOCHS, eta_min=1e-6)
+        # Only use differential LR if Tower 1 was initialized from pretrained weights.
+        # Training from scratch: both towers need full LR.
+        t1_lr = self.lr * self.tower1_lr_scale if self.tower1_pretrained else self.lr
+        opt = torch.optim.AdamW([
+            {"params": list(self.model.tower1_parameters()), "lr": t1_lr},
+            {"params": list(self.model.tower2_and_head_parameters()), "lr": self.lr},
+        ], weight_decay=0.01)
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt, T_max=MAX_EPOCHS, eta_min=1e-6,
+        )
         return [opt], [sched]
 
 
 # ============================================================
-# Data Loading
+# Data Loading (from v14)
 # ============================================================
 def build_dataset(X_data, y_data, cache_path=None, n_workers=16):
     if cache_path and os.path.exists(cache_path):
@@ -902,12 +1201,11 @@ def build_dataset(X_data, y_data, cache_path=None, n_workers=16):
             idx = futures[f]
             try:
                 result = f.result()
-                result["_key"] = keys_list[idx]  # embed sample key
+                result["_key"] = keys_list[idx]
                 items[idx] = result
             except Exception as e:
                 print(f"Error at index {idx}: {e}")
 
-    # Remove any None entries from failed workers
     items = [item for item in items if item is not None]
 
     if cache_path:
@@ -919,7 +1217,40 @@ def build_dataset(X_data, y_data, cache_path=None, n_workers=16):
 
 
 # ============================================================
-# Inference — one clean function, matches v11 pattern
+# Inference
+# ============================================================
+def infer_batch_local(model, dataset, device="cuda"):
+    model.eval()
+    loader = DataLoader(dataset, batch_size=32, shuffle=False,
+                        collate_fn=collate_fn, num_workers=0)
+    all_preds: dict = {}
+    with torch.no_grad():
+        for batch in tqdm(loader, desc="Inferring"):
+            for k, v in batch.items():
+                if isinstance(v, torch.Tensor):
+                    batch[k] = v.to(device)
+            _, node_logits_list = model(
+                batch["edge_data"], batch["edge_types"], batch["edge_mask"],
+                batch["cols"],
+                edge_stats=batch.get("edge_stats"),
+                node_ci=batch.get("node_ci"),
+                struct_rel=batch.get("struct_rel"),
+            )
+            for b in range(len(node_logits_list)):
+                nl = node_logits_list[b]
+                if nl is None:
+                    continue
+                sample_key = batch["_keys"][b]
+                cols = batch["cols"][b]
+                non_xy = [c for c in cols if c not in ("X", "Y")]
+                preds = nl.argmax(-1).cpu().numpy()
+                for vi, vn in enumerate(non_xy):
+                    all_preds[(sample_key, vn)] = int(preds[vi])
+    return all_preds
+
+
+# ============================================================
+# Batch inference → adjacency DataFrames
 # ============================================================
 _CLASS_TO_EDGES = {
     "Confounder":        lambda n: [(n, "X"), (n, "Y")],
@@ -934,14 +1265,8 @@ _CLASS_TO_EDGES = {
 
 
 @torch.no_grad()
-def infer_batch_local(dfs, model, device="cpu", batch_size=64, cache_dir=None):
-    """
-    Takes raw DataFrames → returns list of adjacency DataFrames.
-    Single function: builds tensors, runs model, converts to adjacency.
-    """
+def infer_batch_adj_local(dfs, model, device="cpu", batch_size=32, cache_dir=None):
     model = model.eval()
-
-    # Build or load cached items
     cache_path = None
     if cache_dir:
         cache_path = os.path.join(cache_dir, f"infer_items_{CACHE_TAG}_nk{N_KERNEL}.pkl")
@@ -952,32 +1277,31 @@ def infer_batch_local(dfs, model, device="cpu", batch_size=64, cache_dir=None):
             all_items = pickle.load(f)
     else:
         print(f"Building {len(dfs)} items for inference...")
+        all_items = []
         ctx = mp.get_context('fork')
-        n_workers = max(1, mp.cpu_count() - 1)
         args_list = [(df, None) for df in dfs]
-        ordered = [None] * len(args_list)
-        with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
+        with ProcessPoolExecutor(max_workers=16, mp_context=ctx) as pool:
             futures = {pool.submit(_build_single, a): i for i, a in enumerate(args_list)}
+            ordered = [None] * len(args_list)
             for f in tqdm(as_completed(futures), total=len(futures), desc="Building"):
                 idx = futures[f]
                 try:
                     ordered[idx] = f.result()
                 except Exception as e:
                     print(f"Error at {idx}: {e}")
-        all_items = [x for x in ordered if x is not None]
+            all_items = [x for x in ordered if x is not None]
 
         if cache_path:
             os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
             with open(cache_path, "wb") as f:
                 pickle.dump(all_items, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-    # Run model
     dataset = CausalEdgeDataset(all_items)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
                         collate_fn=collate_fn, num_workers=0)
 
-    results = [None] * len(all_items)
-    idx_off = 0
+    results: list = [None] * len(all_items)
+    idx_off: int = 0
 
     for batch in tqdm(loader, desc="Inference"):
         for k, v in batch.items():
@@ -986,7 +1310,9 @@ def infer_batch_local(dfs, model, device="cpu", batch_size=64, cache_dir=None):
 
         edge_logits, node_logits_list = model(
             batch["edge_data"], batch["edge_types"], batch["edge_mask"],
-            batch["cols"], node_ci=batch.get("node_ci"),
+            batch["cols"],
+            edge_stats=batch.get("edge_stats"),
+            node_ci=batch.get("node_ci"),
             struct_rel=batch.get("struct_rel"),
         )
 
@@ -995,7 +1321,6 @@ def infer_batch_local(dfs, model, device="cpu", batch_size=64, cache_dir=None):
             cols = item["cols"]
             p = item["p"]
 
-            # Build DAG from edge head
             edge_probs = torch.softmax(edge_logits[b], dim=-1)[:, 1]
             E_mat = np.zeros((p, p))
             count = 0
@@ -1007,7 +1332,6 @@ def infer_batch_local(dfs, model, device="cpu", batch_size=64, cache_dir=None):
             adj = transform_proba_to_DAG(cols, E_mat).astype(int)
             A = pd.DataFrame(adj, columns=cols, index=cols)
 
-            # Override with node head predictions (more accurate)
             if node_logits_list[b] is not None:
                 other_nodes = [n for n in cols if n not in ("X", "Y")]
                 node_preds = torch.argmax(node_logits_list[b], dim=-1)
@@ -1025,22 +1349,17 @@ def infer_batch_local(dfs, model, device="cpu", batch_size=64, cache_dir=None):
 
 
 # ============================================================
-# CrunchDAO API: train() and infer()
+# CrunchDAO API
 # ============================================================
 def train(
     X_train: typing.Dict[str, pd.DataFrame],
     y_train: typing.Dict[str, pd.DataFrame],
     model_directory_path: str,
 ) -> None:
-    """CrunchDAO train entry point."""
-    keys = list(X_train.keys())
-
-    # Build dataset
     cache_path = os.path.join(LOCAL_CACHE_DIR, f"train_dataset_{CACHE_TAG}_nk{N_KERNEL}.pkl")
     all_items = build_dataset(X_train, y_train, cache_path=cache_path, n_workers=16)
 
-    # Class weights
-    all_labels = []
+    all_labels: list = []
     for item in all_items:
         if "node_labels" in item:
             all_labels.extend(item["node_labels"].tolist())
@@ -1048,29 +1367,25 @@ def train(
     class_weights = 1.0 / (label_counts + 1.0)
     class_weights = class_weights / class_weights.sum() * N_CLASSES
 
-    # Train
     train_ds = CausalEdgeDataset(all_items)
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
                               collate_fn=collate_fn, num_workers=0)
 
-    model = ADIALightningModule(class_weights=class_weights, lr=LR)
+    lightning_module = ADIALightningModule(class_weights=class_weights, lr=LR)
     trainer = pl.Trainer(
         max_epochs=MAX_EPOCHS,
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
-        precision="16-mixed",
+        precision="32-true",
         gradient_clip_val=1.0,
         log_every_n_steps=10,
     )
-    trainer.fit(model, train_loader)
+    trainer.fit(lightning_module, train_loader)
 
-    # Save
     state_dict = {k.replace("model.", ""): v
-                  for k, v in model.state_dict().items() if k.startswith("model.")}
+                  for k, v in lightning_module.state_dict().items() if k.startswith("model.")}
     os.makedirs(model_directory_path, exist_ok=True)
-    path = os.path.join(model_directory_path, "model.pt")
-    torch.save(state_dict, path)
-    print(f"Model saved to {path}")
+    torch.save(state_dict, os.path.join(model_directory_path, "model.pt"))
 
 
 def infer(
@@ -1079,20 +1394,20 @@ def infer(
     id_column_name: str,
     prediction_column_name: str,
 ) -> pd.DataFrame:
-    """CrunchDAO infer entry point."""
-    path = os.path.join(model_directory_path, "model_v14.pt")
+    path = os.path.join(model_directory_path, "model.pt")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = ADIAModel(aug_noise_std=0.0)
+    model = ADIAMultiTowerModel(aug_noise_std=0.0)
     model.load_state_dict(torch.load(path, map_location=device, weights_only=True))
     model.to(device).eval()
 
-    dfs = [X_test[n] for n in X_test]
+    names = list(X_test.keys())
+    dfs = [X_test[n] for n in names]
     cache_dir = None if IS_CLOUD_SUBMIT else LOCAL_CACHE_DIR
-    adj_list = infer_batch_local(dfs, model, device=device, batch_size=64,
-                                 cache_dir=cache_dir)
+    adj_list = infer_batch_adj_local(dfs, model, device=device, batch_size=64,
+                                     cache_dir=cache_dir)
 
-    submission = {}
-    for name, A in zip(X_test.keys(), adj_list):
+    submission: dict = {}
+    for name, A in zip(names, adj_list):
         for i in A.columns:
             for j in A.columns:
                 submission[f"{name}_{i}_{j}"] = int(A.loc[i, j])
@@ -1115,6 +1430,12 @@ def main():
     parser.add_argument("--lr", type=float, default=LR)
     parser.add_argument("--n_workers", type=int, default=os.cpu_count() - 1)
     parser.add_argument("--devices", type=int, default=1)
+    parser.add_argument("--pretrained", type=str, default=None,
+                        help="Path to v14 model checkpoint to initialize Tower 1")
+    parser.add_argument("--tower1_lr_scale", type=float, default=TOWER1_LR_SCALE,
+                        help="LR multiplier for Tower 1 (default: 0.1)")
+    parser.add_argument("--freeze_tower1_epochs", type=int, default=15,
+                        help="Freeze Tower 1 for this many epochs when using --pretrained (default: 15)")
     args = parser.parse_args()
 
     print("Loading data...")
@@ -1122,80 +1443,91 @@ def main():
     y_train = pd.read_pickle(os.path.join(args.data_dir, "y_train.pickle"))
     X_test = pd.read_pickle(os.path.join(args.data_dir, "X_test_reduced.pickle"))
 
-    # y_pred = infer(X_test, model_directory_path="resources", id_column_name="example_id", prediction_column_name="prediction")
-    # y_pred.to_parquet("prediction/v14.parquet")
+    cache_path = os.path.join(args.cache_dir, f"train_dataset_{CACHE_TAG}_nk{N_KERNEL}.pkl")
+    all_items = build_dataset(X_train, y_train, cache_path=cache_path, n_workers=args.n_workers)
+    print(f"Training on {len(all_items)} samples for {args.epochs} epochs")
 
-    # cache_path = os.path.join(args.cache_dir, f"train_dataset_{CACHE_TAG}_nk{N_KERNEL}.pkl")
-    # all_items = build_dataset(X_train, y_train, cache_path=cache_path, n_workers=args.n_workers)
-    # print(f"Training on all {len(all_items)} samples for {args.epochs} epochs")
+    train_ds = CausalEdgeDataset(all_items)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                              collate_fn=collate_fn, num_workers=0)
 
-    # train_ds = CausalEdgeDataset(all_items)
-    # train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-    #                           collate_fn=collate_fn, num_workers=0)
+    # Class weights
+    all_labels: list = []
+    for item in all_items:
+        if "node_labels" in item:
+            all_labels.extend(item["node_labels"].tolist())
+    label_counts = np.bincount(all_labels, minlength=N_CLASSES).astype(np.float32)
+    class_weights = 1.0 / (label_counts + 1.0)
+    class_weights = class_weights / class_weights.sum() * N_CLASSES
+    print(f"Class weights: {dict(zip(CLASS_NAMES, class_weights.round(3)))}")
 
-    # # Class weights
-    # all_labels = []
-    # for item in all_items:
-    #     if "node_labels" in item:
-    #         all_labels.extend(item["node_labels"].tolist())
-    # label_counts = np.bincount(all_labels, minlength=N_CLASSES).astype(np.float32)
-    # class_weights = 1.0 / (label_counts + 1.0)
-    # class_weights = class_weights / class_weights.sum() * N_CLASSES
-    # print(f"Class weights: {dict(zip(CLASS_NAMES, class_weights.round(3)))}")
+    lightning_module = ADIALightningModule(
+        class_weights=class_weights, lr=args.lr,
+        tower1_lr_scale=args.tower1_lr_scale,
+        tower1_pretrained=(args.pretrained is not None),
+        freeze_tower1_epochs=args.freeze_tower1_epochs if args.pretrained else 0,
+    )
 
-    # model = ADIALightningModule(class_weights=class_weights, lr=args.lr)
+    # Load pretrained Tower 1 from v14
+    if args.pretrained:
+        print(f"\nLoading Tower 1 from v14 checkpoint: {args.pretrained}")
+        v14_state = torch.load(args.pretrained, map_location="cpu", weights_only=True)
+        lightning_module.model.load_tower1_from_v14(v14_state)
 
-    # trainer = pl.Trainer(
-    #     max_epochs=args.epochs,
-    #     accelerator="gpu" if torch.cuda.is_available() else "cpu",
-    #     devices=args.devices,
-    #     precision="32-true",
-    #     gradient_clip_val=1.0,
-    #     log_every_n_steps=10,
-    # )
-    # trainer.fit(model, train_loader)
+    trainer = pl.Trainer(
+        max_epochs=args.epochs,
+        accelerator="gpu" if torch.cuda.is_available() else "cpu",
+        devices=args.devices,
+        precision="32-true",
+        gradient_clip_val=1.0,
+        log_every_n_steps=10,
+    )
+    trainer.fit(lightning_module, train_loader)
 
-    # # Save final model
-    # state_dict = {k.replace("model.", ""): v
-    #               for k, v in model.state_dict().items() if k.startswith("model.")}
-    # os.makedirs("resources", exist_ok=True)
-    # torch.save(state_dict, "resources/model.pt")
-    # print("Saved final model to resources/model.pt")
+    # Save final model
+    state_dict = {k.replace("model.", ""): v
+                  for k, v in lightning_module.state_dict().items() if k.startswith("model.")}
+    os.makedirs("resources", exist_ok=True)
+    torch.save(state_dict, "resources/model.pt")
+    print("Saved final model to resources/model.pt")
+
+    # Count params
+    t1_params = sum(p.numel() for p in lightning_module.model.tower1_parameters())
+    t2_params = sum(p.numel() for p in lightning_module.model.tower2_and_head_parameters())
+    print(f"Tower 1 params: {t1_params:,}  |  Tower 2 + Head params: {t2_params:,}")
+    print(f"Total: {t1_params + t2_params:,}")
 
     # Local eval
     y_test_path = os.path.join(args.data_dir, "y_test_reduced.pickle")
     if os.path.exists(y_test_path):
         print("\n=== Local Evaluation ===")
+        test_cache = os.path.join(args.cache_dir, f"test_dataset_{CACHE_TAG}_nk{N_KERNEL}.pkl")
+        test_items = build_dataset(X_test, None, cache_path=test_cache, n_workers=args.n_workers)
+        test_ds = CausalEdgeDataset(test_items)
+
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        eval_model = ADIAModel(aug_noise_std=0.0)
-        eval_model.load_state_dict(torch.load("resources/model_v14.pt", map_location=device))
+        eval_model = ADIAMultiTowerModel(aug_noise_std=0.0)
+        eval_model.load_state_dict(torch.load("resources/model.pt", map_location=device))
         eval_model.to(device)
 
-        dfs = [X_test[n] for n in X_test]
-        adj_list = infer_batch_local(dfs, eval_model, device=device, batch_size=64,
-                                     cache_dir=args.cache_dir)
+        predictions = infer_batch_local(eval_model, test_ds, device=device)
 
         y_test = pd.read_pickle(y_test_path)
-        test_keys = list(X_test.keys())
         correct, total = 0, 0
         per_class_c = np.zeros(N_CLASSES)
         per_class_t = np.zeros(N_CLASSES)
 
-        for key, A_pred in zip(test_keys, adj_list):
-            # Ground truth labels
+        test_keys = list(X_test.keys())
+        for key in test_keys:
             y_df = y_test[key]
-            adj_true = pd.DataFrame(y_df.values, index=list(y_df.columns),
-                                    columns=list(y_df.columns))
-            true_labels = get_labels(adj_true)
-
-            # Predicted labels (same path as evaluate.py)
-            pred_labels = get_labels(A_pred)
-
+            adj_df = pd.DataFrame(y_df.values, index=list(y_df.columns),
+                                  columns=list(y_df.columns))
+            labels = get_labels(adj_df)
             cols = list(X_test[key].columns)
             for vn in [c for c in cols if c not in ("X", "Y")]:
-                true = true_labels.get(vn)
-                pred = pred_labels.get(vn)
-                if true is not None and pred is not None:
+                pred = predictions.get((key, vn))
+                true = labels.get(vn)
+                if pred is not None and true is not None:
                     total += 1
                     per_class_t[true] += 1
                     if pred == true:
@@ -1203,16 +1535,14 @@ def main():
                         per_class_c[true] += 1
 
         print(f"\nOverall accuracy: {correct/total:.4f} ({correct}/{total})")
-        bal_acc = 0.0
-        n_classes_seen = 0
+        bal_acc: float = 0.0
         for c in range(N_CLASSES):
             if per_class_t[c] > 0:
                 ca = per_class_c[c] / per_class_t[c]
                 bal_acc += ca
-                n_classes_seen += 1
                 print(f"  {CLASS_NAMES[c]:20s}: {ca:.4f} "
                       f"({int(per_class_c[c])}/{int(per_class_t[c])})")
-        bal_acc /= max(n_classes_seen, 1)
+        bal_acc /= N_CLASSES
         print(f"\nBalanced accuracy: {bal_acc:.4f}")
 
 

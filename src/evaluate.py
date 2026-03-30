@@ -131,7 +131,7 @@ y_test = pd.read_pickle("data/y_test_reduced.pickle")
 # read file name from arguments
 parser = argparse.ArgumentParser(description="A simple file reader")
 parser.add_argument(
-    "--pred_path",
+    "--pred",
     type=str,
     required=True,
     # default="prediction/v12_predictions.parquet",
@@ -143,5 +143,5 @@ args = parser.parse_args()
 score = evaluate_predictions(
     X_test,
     y_test,
-    y_pred_path=args.pred_path,
+    y_pred_path=args.pred,
 )

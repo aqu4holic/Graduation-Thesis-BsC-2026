@@ -1128,63 +1128,63 @@ if __name__ == "__main__":
     #     exit(0)
 
     # # Load all 3 models
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    models: list[ADIAModel] = []
-    for seed in SEEDS:
-        model = ADIAModel(d=D_MODEL, aug_noise_std=0.0)
-        path = f"resources/model_v11_ensemble_seed{seed}.pt"
-        model.load_state_dict(torch.load(path, map_location=device, weights_only=True))
-        model.to(device).eval()
-        models.append(model)
-        print(f"Loaded {path}")
+    # device = "cuda" if torch.cuda.is_available() else "cpu"
+    # models: list[ADIAModel] = []
+    # for seed in SEEDS:
+    #     model = ADIAModel(d=D_MODEL, aug_noise_std=0.0)
+    #     path = f"resources/model_v11_ensemble_seed{seed}.pt"
+    #     model.load_state_dict(torch.load(path, map_location=device, weights_only=True))
+    #     model.to(device).eval()
+    #     models.append(model)
+    #     print(f"Loaded {path}")
 
-    # Ensemble evaluation
-    X_test = pd.read_pickle("data/X_test_reduced.pickle")
-    y_test = pd.read_pickle("data/y_test_reduced.pickle")
-    dfs = [X_test[n] for n in X_test]
-    names = list(X_test.keys())
-
-    adj_list = infer_ensemble_local(
-        dfs, models, device=device, batch_size=64, cache_dir=LOCAL_CACHE_DIR
-    )
-
-    adjacency_label = get_adjacency_label()
-    cc = {c: 0 for c in CLASS_NAMES}
-    ct = {c: 0 for c in CLASS_NAMES}
-    for name, A in zip(names, adj_list):
-        pl_ = get_labels(A, adjacency_label)
-        tl = get_labels(y_test[name], adjacency_label)
-        for v in tl:
-            ct[tl[v]] += 1
-            if pl_.get(v, "Independent") == tl[v]:
-                cc[tl[v]] += 1
-
-    print("\n" + "=" * 60)
-    print("ENSEMBLE Per-class accuracy:")
-    accs = []
-    for cls in CLASS_NAMES:
-        n = ct[cls]
-        acc = cc[cls] / n if n > 0 else 0.0
-        accs.append(acc)
-        print(f"  {cls:25s}: {acc:.4f}  (n={n})")
-    print(f"\nENSEMBLE Balanced Accuracy: {np.mean(accs):.4f}")
-
-    # Also eval individual seeds for comparison
-    for seed in SEEDS:
-        model = models[SEEDS.index(seed)]
-        adj_list_single = infer_batch_local(
-            dfs, model, device=device, batch_size=64, cache_dir=LOCAL_CACHE_DIR
-        )
-        cc_s = {c: 0 for c in CLASS_NAMES}
-        for name, A in zip(names, adj_list_single):
-            pl_ = get_labels(A, adjacency_label)
-            tl = get_labels(y_test[name], adjacency_label)
-            for v in tl:
-                if pl_.get(v, "Independent") == tl[v]:
-                    cc_s[tl[v]] += 1
-        accs_s = [cc_s[c] / ct[c] if ct[c] > 0 else 0 for c in CLASS_NAMES]
-        print(f"  Seed {seed}: {np.mean(accs_s):.4f}")
-
+    # # Ensemble evaluation
     # X_test = pd.read_pickle("data/X_test_reduced.pickle")
-    # y_pred = infer(X_test, model_directory_path="resources", id_column_name="example_id", prediction_column_name="prediction")
-    # y_pred.to_parquet("prediction/prediction_v11_ensemble.parquet")
+    # y_test = pd.read_pickle("data/y_test_reduced.pickle")
+    # dfs = [X_test[n] for n in X_test]
+    # names = list(X_test.keys())
+
+    # adj_list = infer_ensemble_local(
+    #     dfs, models, device=device, batch_size=64, cache_dir=LOCAL_CACHE_DIR
+    # )
+
+    # adjacency_label = get_adjacency_label()
+    # cc = {c: 0 for c in CLASS_NAMES}
+    # ct = {c: 0 for c in CLASS_NAMES}
+    # for name, A in zip(names, adj_list):
+    #     pl_ = get_labels(A, adjacency_label)
+    #     tl = get_labels(y_test[name], adjacency_label)
+    #     for v in tl:
+    #         ct[tl[v]] += 1
+    #         if pl_.get(v, "Independent") == tl[v]:
+    #             cc[tl[v]] += 1
+
+    # print("\n" + "=" * 60)
+    # print("ENSEMBLE Per-class accuracy:")
+    # accs = []
+    # for cls in CLASS_NAMES:
+    #     n = ct[cls]
+    #     acc = cc[cls] / n if n > 0 else 0.0
+    #     accs.append(acc)
+    #     print(f"  {cls:25s}: {acc:.4f}  (n={n})")
+    # print(f"\nENSEMBLE Balanced Accuracy: {np.mean(accs):.4f}")
+
+    # # Also eval individual seeds for comparison
+    # for seed in SEEDS:
+    #     model = models[SEEDS.index(seed)]
+    #     adj_list_single = infer_batch_local(
+    #         dfs, model, device=device, batch_size=64, cache_dir=LOCAL_CACHE_DIR
+    #     )
+    #     cc_s = {c: 0 for c in CLASS_NAMES}
+    #     for name, A in zip(names, adj_list_single):
+    #         pl_ = get_labels(A, adjacency_label)
+    #         tl = get_labels(y_test[name], adjacency_label)
+    #         for v in tl:
+    #             if pl_.get(v, "Independent") == tl[v]:
+    #                 cc_s[tl[v]] += 1
+    #     accs_s = [cc_s[c] / ct[c] if ct[c] > 0 else 0 for c in CLASS_NAMES]
+    #     print(f"  Seed {seed}: {np.mean(accs_s):.4f}")
+
+    X_test = pd.read_pickle("data/X_test_reduced.pickle")
+    y_pred = infer(X_test, model_directory_path="resources", id_column_name="example_id", prediction_column_name="prediction")
+    y_pred.to_parquet("prediction/prediction_v11_ensemble.parquet")
