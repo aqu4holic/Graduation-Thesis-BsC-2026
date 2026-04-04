@@ -110,7 +110,7 @@ def evaluate_predictions(X_test, y_test, y_pred_path, n_workers=None):
     for label in sorted(y_true_s.unique()):
         mask = y_true_s == label
         acc = np.mean(y_pred_s[mask] == label)
-        print(f"  {label:25s}: {acc:.4f}  (n={mask.sum()})")
+        print(f"  {label:25s}: {acc:.4f}  ({(y_pred_s[mask] == label).sum()}/{mask.sum()})")
 
     print(f"\nBalanced Accuracy: {score:.4f}")
     return score

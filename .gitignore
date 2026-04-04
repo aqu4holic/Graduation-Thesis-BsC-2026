@@ -17,3 +17,9 @@ wheels/
 *resources/
 *cache*/
 *catboost_info/
+*wandb/
+*causal-discovery-thesis/
+*explore_outputs/
+
+# additional files
+.env

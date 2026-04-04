@@ -29,9 +29,9 @@ Usage:
 import crunch
 
 import os
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["OMP_NUM_THREADS"] = "1"
+# os.environ["OPENBLAS_NUM_THREADS"] = "1"
+# os.environ["MKL_NUM_THREADS"] = "1"
+# os.environ["OMP_NUM_THREADS"] = "1"
 
 import typing
 import gc
@@ -902,18 +902,35 @@ def train(
 @torch.no_grad()
 def infer_batch_local(dfs, model, device="cpu", batch_size=32, cache_dir=None):
     model = model.eval()
-    cache_path = os.path.join(cache_dir, f"infer_v8b_nk{N_KERNEL}.pkl") if cache_dir else None
+    cache_path = os.path.join(cache_dir, f"infer_v11_structbias_nk{N_KERNEL}.pkl") if cache_dir else None
     if cache_path and os.path.exists(cache_path):
         with open(cache_path, "rb") as f:
             all_items = pickle.load(f)
     else:
+        # import multiprocessing as mp
+        # n_workers = max(1, mp.cpu_count() - 1)
+        # args = [(df, None) for df in dfs]
+        # print(f"Building edge tensors ({len(dfs)} graphs, {n_workers} workers)...")
+        # ctx = mp.get_context('fork')
+        # with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
+        #     all_items = list(tqdm(pool.map(_build_single, args, chunksize=8), total=len(args)))
+        # if cache_path:
+        #     os.makedirs(cache_dir, exist_ok=True)
+        #     with open(cache_path, "wb") as f:
+        #         pickle.dump(all_items, f, protocol=pickle.HIGHEST_PROTOCOL)
         import multiprocessing as mp
         n_workers = max(1, mp.cpu_count() - 1)
         args = [(df, None) for df in dfs]
-        print(f"Building edge tensors ({len(dfs)} graphs, {n_workers} workers)...")
+        print(f"Building edge tensors infer ({len(dfs)} graphs, {n_workers} workers)...")
         ctx = mp.get_context('fork')
+        all_items = [None] * len(args)
         with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
-            all_items = list(tqdm(pool.map(_build_single, args, chunksize=8), total=len(args)))
+            futures = {
+                pool.submit(_build_single, a): idx
+                for idx, a in enumerate(args)
+            }
+            for fut in tqdm(as_completed(futures), total=len(args)):
+                all_items[futures[fut]] = fut.result()
         if cache_path:
             os.makedirs(cache_dir, exist_ok=True)
             with open(cache_path, "wb") as f:
@@ -993,20 +1010,20 @@ if __name__ == "__main__":
     print(f"  Config: bs={BATCH_SIZE}, lr={LR}, epochs={MAX_EPOCHS}")
     print("=" * 60)
 
-    X_train = pd.read_pickle("data/X_train.pickle")
-    y_train = pd.read_pickle("data/y_train.pickle")
-    print(f"Loaded {len(X_train)} training samples.")
-    train(X_train, y_train, model_directory_path="resources")
+    # X_train = pd.read_pickle("data/X_train.pickle")
+    # y_train = pd.read_pickle("data/y_train.pickle")
+    # print(f"Loaded {len(X_train)} training samples.")
+    # train(X_train, y_train, model_directory_path="resources")
 
-    rank = int(os.environ.get("LOCAL_RANK", 0))
-    if rank != 0:
-        exit(0)
+    # rank = int(os.environ.get("LOCAL_RANK", 0))
+    # if rank != 0:
+    #     exit(0)
 
     X_test = pd.read_pickle("data/X_test_reduced.pickle")
     y_test = pd.read_pickle("data/y_test_reduced.pickle")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = ADIAModel(d=D_MODEL, aug_noise_std=0.0)
-    model.load_state_dict(torch.load("resources/model.pt", map_location=device, weights_only=True))
+    model.load_state_dict(torch.load("resources/model_v11_structbias.pt", map_location=device, weights_only=True))
     model.to(device).eval()
     dfs = [X_test[n] for n in X_test]
     names = list(X_test.keys())
@@ -1027,5 +1044,5 @@ if __name__ == "__main__":
         n = ct[cls]
         acc = cc[cls] / n if n > 0 else 0.0
         accs.append(acc)
-        print(f"  {cls:25s}: {acc:.4f}  (n={n})")
+        print(f"  {cls:25s}: {acc:.4f}  (n={n}) ({cc[cls]}/{n})")
     print(f"\nBalanced Accuracy: {np.mean(accs):.4f}")

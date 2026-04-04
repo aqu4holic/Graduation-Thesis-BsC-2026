@@ -747,7 +747,7 @@ class ADIAModelWrapper(pl.LightningModule):
             else torch.ones(N_CLASSES),
             ignore_index=-1,
         )
-        self.node_criterion.weight[2] *= 2
+        # self.node_criterion.weight[2] *= 2
         self.edge_criterion = nn.CrossEntropyLoss(
             weight=edge_class_weights if edge_class_weights is not None
             else torch.ones(2),
