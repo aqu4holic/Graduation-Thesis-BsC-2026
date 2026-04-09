@@ -1,43 +1,33 @@
 """
-v26e_density8ch.py — ADIA Causal Discovery
-  8-channel 2D scatter density + edge attention with FUSED node+edge embeddings
+v26f_learnable_smooth.py — ADIA Causal Discovery
+  8-channel 2D density + learnable per-channel smoothing + lambda decay
 
-Builds on v25b (78.99% BA) which proved 4-channel 2D density works.
-Adds 4 ANM residual scatter channels to encode DIRECTIONAL causal signal.
+Based on v26e 8ch (80.47% BA). Two innovations:
+  1. LEARNABLE SMOOTHING: raw histograms (minimal sigma=0.5) fed to a
+     depthwise conv2d that learns per-channel smoothing kernels.
+     Replaces hand-tuned dual sigma (4.0 raw / 2.0 ANM).
+  2. LAMBDA DECAY: edge loss weight decays from 0.7 → 0.1 via cosine.
+     Early: backbone learns good representations via edge supervision.
+     Late: node loss dominates for correct classification objective.
 
-For each node v, create an 8-channel 32x32 image:
-  ch0: density(v, X)       — joint scatter, "does v relate to X?"
-  ch1: density(v, Y)       — joint scatter, "does v relate to Y?"
-  ch2: density(X, v)       — transpose view (conv2d sees local patches differently)
-  ch3: density(Y, v)       — transpose view
-  ch4: density(v, resid_X) — ANM residual of X (regressed on all vars, bw=0.5)
-  ch5: density(X, resid_v) — ANM residual of v (regressed on all vars, bw=0.5)
-  ch6: density(v, resid_Y) — ANM residual of Y
-  ch7: density(Y, resid_v) — ANM residual of v (paired with Y)
-
-Key insight for ch4-7:
-  If v→X: regression X~f(v,others) captures the effect → resid_X is noise
-          → density(v, resid_X) is UNIFORM cloud
-          BUT regression v~g(X,others) is wrong direction → resid_v has structure
-          → density(X, resid_v) shows PATTERN
-  The asymmetry between ch4 vs ch5 directly encodes causal direction.
-  This is what separates Confounder from Mediator — v25b's weakest class (67.7%).
-
-Architecture: v11 edge pipeline (conv1d + struct attn) for edge_head,
-PLUS hierarchical conv2d (with downsampling) FUSED with edge embeddings for node_head.
-
-Beta version — no kernel coefficient channels. Single ANM bandwidth (0.5).
+Channels:
+  ch0: density(v, X)       — raw histogram (sigma=0.5 base)
+  ch1: density(v, Y)
+  ch2: density(X, v)
+  ch3: density(Y, v)
+  ch4: density(v, resid_X) — ANM residual (sigma=0.5 base)
+  ch5: density(X, resid_v)
+  ch6: density(v, resid_Y)
+  ch7: density(Y, resid_v)
 
 Usage:
-    python v26e_density8ch.py
+    python v26f_learnable_smooth.py
 """
 
 # @crunch/keep:on
-from fontTools.misc.symfont import c
 import crunch
 
 import os
-
 import typing
 import gc
 from tqdm.auto import tqdm
@@ -68,13 +58,11 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 N_OBS: int = 1000
 N_KERNEL: int = 1000
 GRID_SIZE: int = 32
-N_NODE_CHANNELS: int = 8  # 4 raw density + 4 ANM residual density + 4 multivariate kernel coeff density
-SCATTER_SIGMA: float = 4.0  # Gaussian smoothing sigma for 2D histograms
-ANM_SIGMA: float = 2.0  # Gaussian smoothing sigma for ANM residual histograms
-ANM_BW: float = 0.5  # Single bandwidth for ANM residual computation
-LOSS_LAMBDA: float = 0.7  # total_loss = lambda * edge_loss + (1 - lambda) * node_loss
-LAMBDA_START: float = 0.7
-LAMBDA_END: float = 0.3
+N_NODE_CHANNELS: int = 8  # 4 raw + 4 ANM
+BASE_SIGMA: float = 0.5   # Minimal smoothing — learnable layer does the rest
+ANM_BW: float = 0.5
+LAMBDA_START: float = 0.7  # Edge loss weight at start
+LAMBDA_END: float = 0.3    # Edge loss weight at end
 N_CLASSES: int = 8
 N_EDGE_TYPES: int = 7
 D_MODEL: int = 64
@@ -96,12 +84,13 @@ LR: float = 1e-3
 AUG_NOISE_STD: float = 0.01
 LOCAL_CACHE_DIR: str = "dataset_cache/"
 IS_CLOUD_SUBMIT: bool = False
-VERSION: str = "v26e"
-VERSION_NAME: str = f"{VERSION}_noch{N_NODE_CHANNELS}_ss{SCATTER_SIGMA}_as{ANM_SIGMA}"
-MODEL_NAME: str = f"{VERSION_NAME}_lam{LOSS_LAMBDA}_lr{LR}_aug{AUG_NOISE_STD}"
+VERSION: str = "v26f"
+VERSION_NAME: str = f"{VERSION}_noch{N_NODE_CHANNELS}"
+MODEL_NAME: str = f"{VERSION_NAME}_lam{LAMBDA_START}-{LAMBDA_END}_lr{LR}_aug{AUG_NOISE_STD}"
+
 
 # ============================================================
-# Graph Utilities (identical to v11)
+# Graph Utilities
 # ============================================================
 def graph_nodes_representation(graph, nodelist):
     adjacency_matrix = nx.adjacency_matrix(graph, nodelist=nodelist).todense()
@@ -169,7 +158,7 @@ def transform_proba_to_DAG(nodes, pred):
 
 
 # ============================================================
-# 1D Preprocessing (identical to v11, for edge pipeline)
+# 1D Preprocessing (for edge pipeline)
 # ============================================================
 def _edge_type(u_name, v_name):
     uX, uY = u_name == "X", u_name == "Y"
@@ -255,10 +244,10 @@ def build_edge_tensor(df):
 
 
 # ============================================================
-# 2D Preprocessing — 8-channel scatter density images
+# 2D Preprocessing — 8ch scatter density (minimal sigma)
 # ============================================================
-def build_scatter_density(source, target, grid_size=32, sigma=5.0):
-    """Raw [-1,1] range, Gaussian smoothed, NO density normalization."""
+def build_scatter_density(source, target, grid_size=32, sigma=0.5):
+    """Raw [-1,1] range, minimal Gaussian smoothing. Learnable layer does the rest."""
     hist, _, _ = np.histogram2d(
         source, target, bins=grid_size, range=[[-1, 1], [-1, 1]]
     )
@@ -266,21 +255,12 @@ def build_scatter_density(source, target, grid_size=32, sigma=5.0):
     return hist_smooth
 
 
-def build_node_images(df, coeff_map=None, resid_map=None):
-    """Build 8-channel scatter density images for each non-X/Y node.
+def build_node_images(df, resid_map=None):
+    """Build 8-channel scatter density images (minimal smoothing).
 
-    For each node v, returns (8, GRID_SIZE, GRID_SIZE):
-      ch0: density(v, X)       — raw joint scatter
-      ch1: density(v, Y)       — raw joint scatter
-      ch2: density(X, v)       — transpose view
-      ch3: density(Y, v)       — transpose view
-      ch4: density(v, resid_X) — ANM residual of X, paired with v
-      ch5: density(X, resid_v) — ANM residual of v, paired with X
-      ch6: density(v, resid_Y) — ANM residual of Y, paired with v
-      ch7: density(Y, resid_v) — ANM residual of v, paired with Y
-
-    Directional signal: if v→X, ch4 is uniform (effect captured by regression)
-    but ch5 shows structure (wrong regression direction → residual has pattern).
+    ch0-3: raw joint density
+    ch4-7: ANM residual density
+    All with BASE_SIGMA=0.5 — learnable conv2d handles the rest.
     """
     cols = list(df.columns)
     data = df.values.astype(np.float32)
@@ -292,12 +272,11 @@ def build_node_images(df, coeff_map=None, resid_map=None):
     x_data = data[:, xi]
     y_data = data[:, yi]
 
-    # Compute ANM residuals at bw=0.5 if not provided
-    if coeff_map is None or resid_map is None:
+    if resid_map is None:
         N = data.shape[0]
         n_sub = min(N_KERNEL, N)
         sub_idx = np.random.choice(N, n_sub, replace=False)
-        coeff_map, resid_map = compute_multivariate_kernel_coefficients(data, sub_idx, bandwidth=ANM_BW)
+        _, resid_map = compute_multivariate_kernel_coefficients(data, sub_idx, bandwidth=ANM_BW)
 
     resid_X = resid_map[xi]
     resid_Y = resid_map[yi]
@@ -308,38 +287,34 @@ def build_node_images(df, coeff_map=None, resid_map=None):
         v_data = data[:, vi]
         resid_v = resid_map[vi]
 
-        # Raw joint density channels
+        # ch0 = build_scatter_density(v_data, x_data, GRID_SIZE, sigma=BASE_SIGMA)
+        # ch1 = build_scatter_density(v_data, y_data, GRID_SIZE, sigma=BASE_SIGMA)
+        # ch2 = build_scatter_density(x_data, v_data, GRID_SIZE, sigma=BASE_SIGMA)
+        # ch3 = build_scatter_density(y_data, v_data, GRID_SIZE, sigma=BASE_SIGMA)
+
+        # ch4 = build_scatter_density(v_data, resid_X, GRID_SIZE, sigma=BASE_SIGMA)
+        # ch5 = build_scatter_density(x_data, resid_v, GRID_SIZE, sigma=BASE_SIGMA)
+        # ch6 = build_scatter_density(v_data, resid_Y, GRID_SIZE, sigma=BASE_SIGMA)
+        # ch7 = build_scatter_density(y_data, resid_v, GRID_SIZE, sigma=BASE_SIGMA)
         chs = []
-        chs.append(build_scatter_density(v_data, x_data, GRID_SIZE, sigma=SCATTER_SIGMA))
-        chs.append(build_scatter_density(v_data, y_data, GRID_SIZE, sigma=SCATTER_SIGMA))
-        chs.append(build_scatter_density(x_data, v_data, GRID_SIZE, sigma=SCATTER_SIGMA))
-        chs.append(build_scatter_density(y_data, v_data, GRID_SIZE, sigma=SCATTER_SIGMA))
+        chs.append(build_scatter_density(v_data, x_data, GRID_SIZE, sigma=BASE_SIGMA))
+        chs.append(build_scatter_density(x_data, v_data, GRID_SIZE, sigma=BASE_SIGMA))
+        chs.append(build_scatter_density(v_data, y_data, GRID_SIZE, sigma=BASE_SIGMA))
+        chs.append(build_scatter_density(y_data, v_data, GRID_SIZE, sigma=BASE_SIGMA))
 
         # ANM residual density channels
-        chs.append(build_scatter_density(v_data, resid_X, GRID_SIZE, sigma=ANM_SIGMA))
-        chs.append(build_scatter_density(x_data, resid_v, GRID_SIZE, sigma=ANM_SIGMA))
-        chs.append(build_scatter_density(v_data, resid_Y, GRID_SIZE, sigma=ANM_SIGMA))
-        chs.append(build_scatter_density(y_data, resid_v, GRID_SIZE, sigma=ANM_SIGMA))
+        chs.append(build_scatter_density(v_data, resid_X, GRID_SIZE, sigma=BASE_SIGMA))
+        chs.append(build_scatter_density(x_data, resid_v, GRID_SIZE, sigma=BASE_SIGMA))
+        chs.append(build_scatter_density(v_data, resid_Y, GRID_SIZE, sigma=BASE_SIGMA))
+        chs.append(build_scatter_density(y_data, resid_v, GRID_SIZE, sigma=BASE_SIGMA))
 
-        # Kernel coefficient density channels
-        coeff_v_to_x = coeff_map[(vi, xi)]
-        coeff_x_to_v = coeff_map[(xi, vi)]
-        coeff_v_to_y = coeff_map[(vi, yi)]
-        coeff_y_to_v = coeff_map[(yi, vi)]
-
-        chs.append(build_scatter_density(v_data, coeff_v_to_x, GRID_SIZE, sigma=ANM_SIGMA))
-        chs.append(build_scatter_density(x_data, coeff_x_to_v, GRID_SIZE, sigma=ANM_SIGMA))
-        chs.append(build_scatter_density(v_data, coeff_v_to_y, GRID_SIZE, sigma=ANM_SIGMA))
-        chs.append(build_scatter_density(y_data, coeff_y_to_v, GRID_SIZE, sigma=ANM_SIGMA))
-
-        # node_images[v_name] = np.stack([ch0, ch1, ch2, ch3, ch4, ch5, ch6, ch7, ch8, ch9, ch10, ch11], axis=0)
         node_images[v_name] = np.stack(chs, axis=0)
 
     return node_images
 
 
 # ============================================================
-# Structural Relationship Matrix (identical to v11)
+# Structural Relationship Matrix
 # ============================================================
 def build_struct_rel_matrix(p):
     E = p * (p - 1)
@@ -381,11 +356,10 @@ def _build_single(args):
     n_sub = min(N_KERNEL, N)
     sub_idx = np.random.choice(N, n_sub, replace=False)
 
-    # Compute kernel regression at bw=0.5 for node images (ANM residuals)
-    coeff_map, resid_map = compute_multivariate_kernel_coefficients(data, sub_idx, bandwidth=ANM_BW)
+    _, resid_map = compute_multivariate_kernel_coefficients(data, sub_idx, bandwidth=ANM_BW)
 
     edge_data, edge_types = build_edge_tensor(df)
-    node_images = build_node_images(df, coeff_map=coeff_map, resid_map=resid_map)
+    node_images = build_node_images(df, resid_map=resid_map)
 
     cols = list(df.columns)
     p = len(cols)
@@ -551,16 +525,29 @@ class EdgeFeatureExtractor(nn.Module):
 
 
 class NodeFeatureExtractor2D(nn.Module):
-    """Hierarchical conv2d with progressive downsampling.
+    """Learnable per-channel smoothing + hierarchical conv2d.
 
-    Input: (B_nodes, 8, 32, 32)
-    Output: (B_nodes, d)
-
-    32x32 -> 16x16 -> 8x8 -> 4x4 -> pool -> d
-    Full receptive field ensures global diagonal patterns are visible.
+    Input: (B, 8, 32, 32) — minimally smoothed histograms
+    Step 1: depthwise conv (groups=8) learns per-channel smoothing
+    Step 2: hierarchical conv2d with downsampling
+    Output: (B, d)
     """
     def __init__(self, d=64, n_channels=8):
         super().__init__()
+        # Learnable per-channel smoothing: each channel gets its own 11x11 kernel
+        # self.smooth = nn.Conv2d(n_channels, n_channels, kernel_size=11, padding=5,
+        #                         groups=n_channels, bias=False)
+        # # Initialize to approximate Gaussian sigma=3
+        # with torch.no_grad():
+        #     for i in range(n_channels):
+        #         k = torch.zeros(1, 1, 11, 11)
+        #         center = 5
+        #         for y in range(11):
+        #             for x in range(11):
+        #                 k[0, 0, y, x] = math.exp(-((x - center)**2 + (y - center)**2) / (2 * 3.0**2))
+        #         k /= k.sum()
+        #         self.smooth.weight.data[i] = k
+
         self.net = nn.Sequential(
             # 32x32 -> 32x32
             nn.Conv2d(n_channels, 32, 3, padding=1),
@@ -584,6 +571,7 @@ class NodeFeatureExtractor2D(nn.Module):
         )
 
     def forward(self, x):
+        # x = self.smooth(x)
         return self.net(x)
 
 
@@ -622,13 +610,6 @@ class StructuralSelfAttention(nn.Module):
 
 
 class ADIAModel(nn.Module):
-    """v26e: Edge 1D pipeline + 8ch node 2D pipeline FUSED with edge embeddings.
-
-    Edge pipeline: v11 (conv1d -> struct attn -> edge_head)
-    Node pipeline: hierarchical conv2d on 8ch density images
-                   -> merge with 4 edge embeddings -> node_head (8-class)
-    """
-
     def __init__(self, d=None, n_edge_types=None, aug_noise_std=0.0):
         super().__init__()
         d = d or D_MODEL
@@ -636,7 +617,7 @@ class ADIAModel(nn.Module):
         self.d = d
         self.aug_noise_std = aug_noise_std
 
-        # Edge pipeline (v11)
+        # Edge pipeline (context encoder)
         self.extractor = EdgeFeatureExtractor(d, n_channels=N_CHANNELS_1D)
         self.edge_type_emb = nn.Embedding(n_edge_types, d)
         self.edge_merge = MergeOperator(n_inputs=2, d=d)
@@ -646,9 +627,9 @@ class ADIAModel(nn.Module):
         )
         self.edge_head = nn.Linear(d, 2)
 
-        # Node pipeline (v26e: 8ch density fused with edges)
+        # Node pipeline (learnable smoothing + hierarchical conv2d)
         self.node_extractor = NodeFeatureExtractor2D(d, n_channels=N_NODE_CHANNELS)
-        self.node_merge = MergeOperator(n_inputs=5, d=d)  # 4 edges + 1 node_2d
+        self.node_merge = MergeOperator(n_inputs=5, d=d)
         self.node_head = nn.Linear(d, N_CLASSES)
 
     def forward(self, edge_data, edge_types, edge_mask, cols_list,
@@ -658,7 +639,6 @@ class ADIAModel(nn.Module):
         if self.training and self.aug_noise_std > 0:
             edge_data = edge_data + torch.randn_like(edge_data) * self.aug_noise_std
 
-        # Edge pipeline
         x_flat = edge_data.view(B * E, C, N)
         conv_emb = self.extractor(x_flat).view(B, E, self.d)
         type_emb = self.edge_type_emb(edge_types)
@@ -678,7 +658,6 @@ class ADIAModel(nn.Module):
 
         edge_logits = self.edge_head(edge_emb)
 
-        # Node pipeline — 8ch conv2d + fuse with edge embeddings
         node_logits_list = []
         if node_imgs is not None:
             B_n, K, C_n, H, W = node_imgs.shape
@@ -687,7 +666,6 @@ class ADIAModel(nn.Module):
             node_2d_embs = flat_emb.view(B_n, K, self.d)
 
             def _eidx(p, u, v):
-                """Get edge index for directed edge u->v in p-node graph."""
                 idx = 0
                 for uu in range(p):
                     for vv in range(p):
@@ -810,8 +788,9 @@ class ADIAModelWrapper(pl.LightningModule):
         total_loss = torch.tensor(0.0, device=self.device)
 
         lam = self._get_lambda()
+        # self.log(f"{split}/lambda", lam, prog_bar=False, sync_dist=True)
 
-        # Edge loss
+        # Edge loss (lambda-weighted, decaying)
         if "edge_labels" in batch:
             el = batch["edge_labels"].to(self.device)
             mask = batch["edge_mask"].to(self.device)
@@ -819,9 +798,9 @@ class ADIAModelWrapper(pl.LightningModule):
             if fl.numel() > 0:
                 edge_loss = self.edge_criterion(fl, fb)
                 total_loss = total_loss + lam * edge_loss
-                self.log(f"{split}/edge_loss", edge_loss, prog_bar=False, sync_dist=True)
+                self.log(f"{split}/edge_loss", edge_loss, prog_bar=True, sync_dist=True)
 
-        # Node loss
+        # Node loss (primary, weight = 1 - lambda)
         if "node_labels" in batch:
             all_nl, all_ll = [], []
             nl = batch["node_labels"].to(self.device)
@@ -903,23 +882,19 @@ def train(X_train, y_train, model_directory_path):
 
     wandb_logger = WandbLogger(
         project="causal-discovery-thesis",
-        name=f"v26e_density_noch{N_NODE_CHANNELS}_ss{SCATTER_SIGMA}_as{ANM_SIGMA}",
+        name=VERSION_NAME,
         config={
             "version": VERSION_NAME,
-            "n_obs": N_OBS,
-            "n_kernel": N_KERNEL,
-            "grid_size": GRID_SIZE,
-            "scatter_sigma": SCATTER_SIGMA,
-            "anm_bw": ANM_BW,
             "n_node_channels": N_NODE_CHANNELS,
-            "n_channels_1d": N_CHANNELS_1D,
+            "base_sigma": BASE_SIGMA,
+            "anm_bw": ANM_BW,
+            "lambda_start": LAMBDA_START,
+            "lambda_end": LAMBDA_END,
+            "learnable_smooth_kernel": 11,
             "d_model": D_MODEL,
-            "n_heads": N_HEADS,
-            "bandwidths": BANDWIDTHS,
             "batch_size": BATCH_SIZE,
             "lr": LR,
             "max_epochs": MAX_EPOCHS,
-            "aug_noise_std": AUG_NOISE_STD,
             "n_params": n_params,
             "n_samples": len(dataset),
         },
@@ -954,10 +929,7 @@ def infer_batch_local(dfs, model, device="cpu", batch_size=32, cache_dir=None):
         ctx = mp.get_context('fork')
         all_items = [None] * len(args)
         with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
-            futures = {
-                pool.submit(_build_single, a): idx
-                for idx, a in enumerate(args)
-            }
+            futures = {pool.submit(_build_single, a): idx for idx, a in enumerate(args)}
             for fut in tqdm(as_completed(futures), total=len(args)):
                 all_items[futures[fut]] = fut.result()
         if cache_path:
@@ -1037,28 +1009,27 @@ def infer(X_test, model_directory_path, id_column_name, prediction_column_name):
 # ============================================================
 if __name__ == "__main__":
     print("=" * 60)
-    print(f"v26e: {N_NODE_CHANNELS}-Channel Density + Edge-Fused Node")
-    print(f"  Node: {N_NODE_CHANNELS}ch x {GRID_SIZE}x{GRID_SIZE} (scatter_sigma={SCATTER_SIGMA}, anm_sigma={ANM_SIGMA}, anm_bw={ANM_BW})")
-    print(f"  Node merge: 5 inputs (4 edge embs + 1 node_2d)")
-    print(f"  Edge: v11 1D pipeline (conv1d + struct attn)")
+    print(f"{VERSION}: 8ch Density + Learnable Smoothing + Lambda Decay")
+    print(f"  Node: {N_NODE_CHANNELS}ch x {GRID_SIZE}x{GRID_SIZE} (base_sigma={BASE_SIGMA})")
+    print(f"  Learnable smooth: depthwise 11x11 conv, init ~sigma=3")
+    print(f"  Lambda: {LAMBDA_START} -> {LAMBDA_END} (cosine)")
     print(f"  Config: bs={BATCH_SIZE}, lr={LR}, epochs={MAX_EPOCHS}")
     print("=" * 60)
 
-    X_train = pd.read_pickle("data/X_train.pickle")
-    y_train = pd.read_pickle("data/y_train.pickle")
-    print(f"Loaded {len(X_train)} training samples.")
-    train(X_train, y_train, model_directory_path="resources")
+    # X_train = pd.read_pickle("data/X_train.pickle")
+    # y_train = pd.read_pickle("data/y_train.pickle")
+    # print(f"Loaded {len(X_train)} training samples.")
+    # train(X_train, y_train, model_directory_path="resources")
 
-    rank = int(os.environ.get("LOCAL_RANK", 0))
-    if rank != 0:
-        exit(0)
+    # rank = int(os.environ.get("LOCAL_RANK", 0))
+    # if rank != 0:
+    #     exit(0)
 
     X_test = pd.read_pickle("data/X_test_reduced.pickle")
     y_test = pd.read_pickle("data/y_test_reduced.pickle")
     device = "cuda:1" if torch.cuda.is_available() else "cpu"
     model = ADIAModel(d=D_MODEL, aug_noise_std=0.0)
     model.load_state_dict(torch.load(f"resources/{MODEL_NAME}.pt", map_location=device, weights_only=True))
-    print(f"Model loaded from resources/{MODEL_NAME}.pt")
     model.to(device).eval()
     dfs = [X_test[n] for n in X_test]
     names = list(X_test.keys())

@@ -128,20 +128,24 @@ y_test = pd.read_pickle("data/y_test_reduced.pickle")
 # # %%
 # len(X_train), len(X_test)
 
-# read file name from arguments
-parser = argparse.ArgumentParser(description="A simple file reader")
-parser.add_argument(
-    "--pred",
-    type=str,
-    required=True,
-    # default="prediction/v12_predictions.parquet",
-    help="Path to the prediction parquet file",
-)
-args = parser.parse_args()
+def main():
+    # read file name from arguments
+    parser = argparse.ArgumentParser(description="A simple file reader")
+    parser.add_argument(
+        "--pred",
+        type=str,
+        required=True,
+        # default="prediction/v12_predictions.parquet",
+        help="Path to the prediction parquet file",
+    )
+    args = parser.parse_args()
 
-# %%
-score = evaluate_predictions(
-    X_test,
-    y_test,
-    y_pred_path=args.pred,
-)
+    # %%
+    score = evaluate_predictions(
+        X_test,
+        y_test,
+        y_pred_path=args.pred,
+    )
+
+if __name__ == "main":
+    main()

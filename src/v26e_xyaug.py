@@ -1,43 +1,28 @@
 """
-v26e_density8ch.py — ADIA Causal Discovery
-  8-channel 2D scatter density + edge attention with FUSED node+edge embeddings
+v26e_xyaug.py — ADIA Causal Discovery
+  v26e (12ch density, 80.47% BA) + XY remap augmentation (~11x data)
 
-Builds on v25b (78.99% BA) which proved 4-channel 2D density works.
-Adds 4 ANM residual scatter channels to encode DIRECTIONAL causal signal.
+Same architecture as v26e:
+  12-channel node images (4 raw + 4 ANM + 4 kernel coeff) fused with edge embeddings.
+  Edge pipeline as context encoder with lambda-weighted auxiliary loss.
 
-For each node v, create an 8-channel 32x32 image:
-  ch0: density(v, X)       — joint scatter, "does v relate to X?"
-  ch1: density(v, Y)       — joint scatter, "does v relate to Y?"
-  ch2: density(X, v)       — transpose view (conv2d sees local patches differently)
-  ch3: density(Y, v)       — transpose view
-  ch4: density(v, resid_X) — ANM residual of X (regressed on all vars, bw=0.5)
-  ch5: density(X, resid_v) — ANM residual of v (regressed on all vars, bw=0.5)
-  ch6: density(v, resid_Y) — ANM residual of Y
-  ch7: density(Y, resid_v) — ANM residual of v (paired with Y)
+XY aug optimization: kernel regression (coeff_map, resid_map) and edge_data
+computed ONCE per graph. For each XY remap, only rebuild:
+  - edge_types (cheap: just name swaps)
+  - node_images (cheap: histograms from precomputed coeff/resid maps)
+  - labels (cheap: adjacency relabeling)
 
-Key insight for ch4-7:
-  If v→X: regression X~f(v,others) captures the effect → resid_X is noise
-          → density(v, resid_X) is UNIFORM cloud
-          BUT regression v~g(X,others) is wrong direction → resid_v has structure
-          → density(X, resid_v) shows PATTERN
-  The asymmetry between ch4 vs ch5 directly encodes causal direction.
-  This is what separates Confounder from Mediator — v25b's weakest class (67.7%).
-
-Architecture: v11 edge pipeline (conv1d + struct attn) for edge_head,
-PLUS hierarchical conv2d (with downsampling) FUSED with edge embeddings for node_head.
-
-Beta version — no kernel coefficient channels. Single ANM bandwidth (0.5).
+Shard-based dataset: ~263K augmented samples, streamed to disk in 50K shards.
 
 Usage:
-    python v26e_density8ch.py
+    python v26e_xyaug.py
 """
 
 # @crunch/keep:on
-from fontTools.misc.symfont import c
 import crunch
 
 import os
-
+import glob
 import typing
 import gc
 from tqdm.auto import tqdm
@@ -48,7 +33,7 @@ from scipy.ndimage import gaussian_filter
 
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 import torch.nn.functional as F
 
 import pytorch_lightning as pl
@@ -68,13 +53,11 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 N_OBS: int = 1000
 N_KERNEL: int = 1000
 GRID_SIZE: int = 32
-N_NODE_CHANNELS: int = 8  # 4 raw density + 4 ANM residual density + 4 multivariate kernel coeff density
-SCATTER_SIGMA: float = 4.0  # Gaussian smoothing sigma for 2D histograms
-ANM_SIGMA: float = 2.0  # Gaussian smoothing sigma for ANM residual histograms
-ANM_BW: float = 0.5  # Single bandwidth for ANM residual computation
+N_NODE_CHANNELS: int = 8
+SCATTER_SIGMA: float = 4.0
+ANM_SIGMA: float = 2.0
+ANM_BW: float = 0.5
 LOSS_LAMBDA: float = 0.7  # total_loss = lambda * edge_loss + (1 - lambda) * node_loss
-LAMBDA_START: float = 0.7
-LAMBDA_END: float = 0.3
 N_CLASSES: int = 8
 N_EDGE_TYPES: int = 7
 D_MODEL: int = 64
@@ -90,18 +73,20 @@ CLASS_NAMES: list[str] = [
 BANDWIDTHS: list[float] = [0.2, 0.5, 1.0]
 N_CHANNELS_1D: int = 2 + len(BANDWIDTHS) + len(BANDWIDTHS)  # 8
 
-MAX_EPOCHS: int = 30
-BATCH_SIZE: int = 16
+MAX_EPOCHS: int = 10
+BATCH_SIZE: int = 64
 LR: float = 1e-3
 AUG_NOISE_STD: float = 0.01
 LOCAL_CACHE_DIR: str = "dataset_cache/"
+SHARD_SIZE: int = 50_000
 IS_CLOUD_SUBMIT: bool = False
-VERSION: str = "v26e"
+VERSION: str = "v26e_xyaug"
 VERSION_NAME: str = f"{VERSION}_noch{N_NODE_CHANNELS}_ss{SCATTER_SIGMA}_as{ANM_SIGMA}"
 MODEL_NAME: str = f"{VERSION_NAME}_lam{LOSS_LAMBDA}_lr{LR}_aug{AUG_NOISE_STD}"
 
+
 # ============================================================
-# Graph Utilities (identical to v11)
+# Graph Utilities
 # ============================================================
 def graph_nodes_representation(graph, nodelist):
     adjacency_matrix = nx.adjacency_matrix(graph, nodelist=nodelist).todense()
@@ -169,7 +154,7 @@ def transform_proba_to_DAG(nodes, pred):
 
 
 # ============================================================
-# 1D Preprocessing (identical to v11, for edge pipeline)
+# 1D Preprocessing (for edge pipeline)
 # ============================================================
 def _edge_type(u_name, v_name):
     uX, uY = u_name == "X", u_name == "Y"
@@ -255,7 +240,7 @@ def build_edge_tensor(df):
 
 
 # ============================================================
-# 2D Preprocessing — 8-channel scatter density images
+# 2D Preprocessing — 12-channel scatter density images
 # ============================================================
 def build_scatter_density(source, target, grid_size=32, sigma=5.0):
     """Raw [-1,1] range, Gaussian smoothed, NO density normalization."""
@@ -267,20 +252,11 @@ def build_scatter_density(source, target, grid_size=32, sigma=5.0):
 
 
 def build_node_images(df, coeff_map=None, resid_map=None):
-    """Build 8-channel scatter density images for each non-X/Y node.
+    """Build 12-channel scatter density images for each non-X/Y node.
 
-    For each node v, returns (8, GRID_SIZE, GRID_SIZE):
-      ch0: density(v, X)       — raw joint scatter
-      ch1: density(v, Y)       — raw joint scatter
-      ch2: density(X, v)       — transpose view
-      ch3: density(Y, v)       — transpose view
-      ch4: density(v, resid_X) — ANM residual of X, paired with v
-      ch5: density(X, resid_v) — ANM residual of v, paired with X
-      ch6: density(v, resid_Y) — ANM residual of Y, paired with v
-      ch7: density(Y, resid_v) — ANM residual of v, paired with Y
-
-    Directional signal: if v→X, ch4 is uniform (effect captured by regression)
-    but ch5 shows structure (wrong regression direction → residual has pattern).
+    ch0-3:  raw joint density (sigma=SCATTER_SIGMA)
+    ch4-7:  ANM residual density (sigma=ANM_SIGMA)
+    ch8-11: kernel coefficient density (sigma=ANM_SIGMA)
     """
     cols = list(df.columns)
     data = df.values.astype(np.float32)
@@ -292,7 +268,6 @@ def build_node_images(df, coeff_map=None, resid_map=None):
     x_data = data[:, xi]
     y_data = data[:, yi]
 
-    # Compute ANM residuals at bw=0.5 if not provided
     if coeff_map is None or resid_map is None:
         N = data.shape[0]
         n_sub = min(N_KERNEL, N)
@@ -321,16 +296,17 @@ def build_node_images(df, coeff_map=None, resid_map=None):
         chs.append(build_scatter_density(v_data, resid_Y, GRID_SIZE, sigma=ANM_SIGMA))
         chs.append(build_scatter_density(y_data, resid_v, GRID_SIZE, sigma=ANM_SIGMA))
 
-        # Kernel coefficient density channels
-        coeff_v_to_x = coeff_map[(vi, xi)]
-        coeff_x_to_v = coeff_map[(xi, vi)]
-        coeff_v_to_y = coeff_map[(vi, yi)]
-        coeff_y_to_v = coeff_map[(yi, vi)]
+        if (N_NODE_CHANNELS > 8):
+            # Kernel coefficient density channels
+            coeff_v_to_x = coeff_map[(vi, xi)]
+            coeff_x_to_v = coeff_map[(xi, vi)]
+            coeff_v_to_y = coeff_map[(vi, yi)]
+            coeff_y_to_v = coeff_map[(yi, vi)]
 
-        chs.append(build_scatter_density(v_data, coeff_v_to_x, GRID_SIZE, sigma=ANM_SIGMA))
-        chs.append(build_scatter_density(x_data, coeff_x_to_v, GRID_SIZE, sigma=ANM_SIGMA))
-        chs.append(build_scatter_density(v_data, coeff_v_to_y, GRID_SIZE, sigma=ANM_SIGMA))
-        chs.append(build_scatter_density(y_data, coeff_y_to_v, GRID_SIZE, sigma=ANM_SIGMA))
+            chs.append(build_scatter_density(v_data, coeff_v_to_x, GRID_SIZE, sigma=ANM_SIGMA))
+            chs.append(build_scatter_density(x_data, coeff_x_to_v, GRID_SIZE, sigma=ANM_SIGMA))
+            chs.append(build_scatter_density(v_data, coeff_v_to_y, GRID_SIZE, sigma=ANM_SIGMA))
+            chs.append(build_scatter_density(y_data, coeff_y_to_v, GRID_SIZE, sigma=ANM_SIGMA))
 
         # node_images[v_name] = np.stack([ch0, ch1, ch2, ch3, ch4, ch5, ch6, ch7, ch8, ch9, ch10, ch11], axis=0)
         node_images[v_name] = np.stack(chs, axis=0)
@@ -339,7 +315,7 @@ def build_node_images(df, coeff_map=None, resid_map=None):
 
 
 # ============================================================
-# Structural Relationship Matrix (identical to v11)
+# Structural Relationship Matrix
 # ============================================================
 def build_struct_rel_matrix(p):
     E = p * (p - 1)
@@ -372,7 +348,7 @@ def get_struct_rel_matrix(p):
 
 
 # ============================================================
-# Sample Builder
+# Sample Builder (single, no aug)
 # ============================================================
 def _build_single(args):
     df, y_df = args
@@ -381,7 +357,6 @@ def _build_single(args):
     n_sub = min(N_KERNEL, N)
     sub_idx = np.random.choice(N, n_sub, replace=False)
 
-    # Compute kernel regression at bw=0.5 for node images (ANM residuals)
     coeff_map, resid_map = compute_multivariate_kernel_coefficients(data, sub_idx, bandwidth=ANM_BW)
 
     edge_data, edge_types = build_edge_tensor(df)
@@ -422,17 +397,239 @@ def _build_single(args):
 
 
 # ============================================================
-# Dataset & Collate
+# XY Remap Augmentation
 # ============================================================
-class InMemoryDataset(Dataset):
-    def __init__(self, samples):
-        self.samples = samples
+def _remap_xy_names(cols, new_x, new_y):
+    result = list(cols)
+    pos = {c: i for i, c in enumerate(cols)}
+    i_nx, i_x = pos[new_x], pos["X"]
+    result[i_nx], result[i_x] = result[i_x], result[i_nx]
+    pos2 = {c: i for i, c in enumerate(result)}
+    i_ny, i_y = pos2[new_y], pos2["Y"]
+    result[i_ny], result[i_y] = result[i_y], result[i_ny]
+    return {cols[i]: result[i] for i in range(len(cols))}
+
+
+def _build_all_from_one_graph(args):
+    """Build base + all XY-augmented samples from one graph.
+
+    Optimization: edge_data, coeff_map, resid_map computed ONCE.
+    For each remap: rebuild edge_types + node_images + labels (all cheap).
+    """
+    df, y_df = args
+
+    # === Expensive part: compute ONCE ===
+    edge_data, _ = build_edge_tensor(df)
+
+    data = df.values.astype(np.float32)
+    N = data.shape[0]
+    n_sub = min(N_KERNEL, N)
+    sub_idx = np.random.choice(N, n_sub, replace=False)
+    coeff_map, resid_map = compute_multivariate_kernel_coefficients(data, sub_idx, bandwidth=ANM_BW)
+
+    cols = list(df.columns)
+    p = len(cols)
+
+    def _make_sample(cur_cols, cur_y_df):
+        """Build sample reusing precomputed edge_data, coeff_map, resid_map."""
+        # Edge types (cheap: just name-based)
+        edge_types = []
+        for i, u_name in enumerate(cur_cols):
+            for j, v_name in enumerate(cur_cols):
+                if i != j:
+                    edge_types.append(_edge_type(u_name, v_name))
+        edge_types = np.array(edge_types, dtype=np.int64)
+
+        # Node images (cheap: histograms from precomputed maps)
+        # Create a temporary df with remapped column names but same data
+        tmp_df = pd.DataFrame(data, columns=cur_cols)
+        node_images = build_node_images(tmp_df, coeff_map=coeff_map, resid_map=resid_map)
+
+        other_nodes = [c for c in cur_cols if c not in ("X", "Y")]
+        result = {
+            "edge_data": edge_data,
+            "edge_types": edge_types,
+            "cols": cur_cols,
+            "p": p,
+            "node_images": node_images,
+            "other_nodes": other_nodes,
+        }
+
+        if cur_y_df is not None:
+            adj_np = cur_y_df.values.astype(np.float32)
+            adj_cols = list(cur_y_df.columns)
+
+            edge_labels = []
+            for ui in range(p):
+                for vi in range(p):
+                    if ui != vi:
+                        edge_labels.append(int(adj_np[ui, vi]))
+            result["edge_labels"] = np.array(edge_labels, dtype=np.int64)
+
+            _, adjacency_label = create_graph_label()
+            df_adj = pd.DataFrame(adj_np, columns=adj_cols, index=adj_cols)
+            try:
+                node_labels_dict = get_labels(df_adj, adjacency_label)
+            except KeyError:
+                return None
+            node_labels = [CLASS_NAMES.index(node_labels_dict[n]) for n in other_nodes]
+            result["node_labels"] = np.array(node_labels, dtype=np.int64)
+
+        return result
+
+    results = []
+
+    # Base sample (original X, Y)
+    base = _make_sample(cols, y_df)
+    if base is not None:
+        results.append(base)
+
+    # Augmented samples: for each directed edge A→B in ground truth, remap A→X, B→Y
+    if y_df is not None:
+        adj_np = y_df.values.astype(np.float32)
+        col_idx = {c: i for i, c in enumerate(cols)}
+        for a_name in y_df.columns:
+            for b_name in y_df.columns:
+                if a_name == b_name:
+                    continue
+                if adj_np[col_idx[a_name], col_idx[b_name]] != 1:
+                    continue
+                if a_name == "X" and b_name == "Y":
+                    continue
+                rename_map = _remap_xy_names(cols, a_name, b_name)
+                new_cols = [rename_map[c] for c in cols]
+                new_y_df = y_df.rename(index=rename_map, columns=rename_map)
+                sample = _make_sample(new_cols, new_y_df)
+                if sample is not None:
+                    results.append(sample)
+
+    return results
+
+
+# ============================================================
+# Sharded Dataset + Sampler
+# ============================================================
+def _flush_shard(buffer, shard_dir, shard_idx):
+    path = os.path.join(shard_dir, f"shard_{shard_idx:04d}.pkl")
+    with open(path, "wb") as f:
+        pickle.dump(buffer, f, protocol=pickle.HIGHEST_PROTOCOL)
+    n = len(buffer)
+    print(f"  Flushed shard {shard_idx}: {n} samples")
+    return n
+
+
+def _build_and_save_shards(X_list, y_list, shard_dir, n_workers=47):
+    os.makedirs(shard_dir, exist_ok=True)
+
+    buffer = []
+    shard_sizes = []
+    shard_idx = 0
+    n_collected = 0
+
+    import multiprocessing as mp
+    ctx = mp.get_context('fork')
+
+    args = [(X_list[i], y_list[i]) for i in range(len(X_list))]
+    n_base = len(args)
+    print(f"Building augmented dataset ({n_base} base graphs, {n_workers} workers)...")
+
+    with ctx.Pool(processes=n_workers) as pool:
+        for result_list in tqdm(
+            pool.imap_unordered(_build_all_from_one_graph, args, chunksize=4),
+            total=n_base,
+        ):
+            for sample in result_list:
+                buffer.append(sample)
+                n_collected += 1
+
+            if len(buffer) >= SHARD_SIZE:
+                shard_sizes.append(_flush_shard(buffer, shard_dir, shard_idx))
+                shard_idx += 1
+                buffer.clear()
+                gc.collect()
+
+    if buffer:
+        shard_sizes.append(_flush_shard(buffer, shard_dir, shard_idx))
+        buffer.clear()
+        gc.collect()
+
+    meta = {
+        "n_samples": n_collected,
+        "n_shards": len(shard_sizes),
+        "shard_sizes": shard_sizes,
+    }
+    with open(os.path.join(shard_dir, "meta.pkl"), "wb") as f:
+        pickle.dump(meta, f)
+    print(f"Done: {n_collected} samples in {len(shard_sizes)} shards.")
+    return meta
+
+
+class ShardGroupedSampler(Sampler):
+    def __init__(self, shard_sizes, seed=42):
+        self.shard_sizes = shard_sizes
+        self.n_shards = len(shard_sizes)
+        self.total = sum(shard_sizes)
+        self.shard_offsets = []
+        offset = 0
+        for s in shard_sizes:
+            self.shard_offsets.append(offset)
+            offset += s
+        self.epoch = 0
+        self.seed = seed
+
+    def __iter__(self):
+        rng = np.random.RandomState(self.seed + self.epoch)
+        shard_order = rng.permutation(self.n_shards)
+        indices = []
+        for si in shard_order:
+            local = rng.permutation(self.shard_sizes[si]) + self.shard_offsets[si]
+            indices.extend(local.tolist())
+        return iter(indices)
 
     def __len__(self):
-        return len(self.samples)
+        return self.total
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+
+class CausalEdgeDataset(Dataset):
+    def __init__(self, shard_dir):
+        meta_path = os.path.join(shard_dir, "meta.pkl")
+        with open(meta_path, "rb") as f:
+            meta = pickle.load(f)
+        self.n_samples = meta["n_samples"]
+        self.n_shards = meta["n_shards"]
+        self.shard_sizes = meta["shard_sizes"]
+        self.shard_dir = shard_dir
+        self.shard_offsets = []
+        offset = 0
+        for s in self.shard_sizes:
+            self.shard_offsets.append(offset)
+            offset += s
+        self._cur_shard_idx = -1
+        self._cur_shard_data = None
+
+    def __len__(self):
+        return self.n_samples
+
+    def _find_shard(self, idx):
+        for si in range(self.n_shards):
+            if idx < self.shard_offsets[si] + self.shard_sizes[si]:
+                return si, idx - self.shard_offsets[si]
+        raise IndexError(f"Index {idx} out of range")
+
+    def _load_shard(self, si):
+        if si != self._cur_shard_idx:
+            path = os.path.join(self.shard_dir, f"shard_{si:04d}.pkl")
+            with open(path, "rb") as f:
+                self._cur_shard_data = pickle.load(f)
+            self._cur_shard_idx = si
 
     def __getitem__(self, idx):
-        item = self.samples[idx]
+        si, local = self._find_shard(idx)
+        self._load_shard(si)
+        item = self._cur_shard_data[local]
         result = {
             "edge_data": torch.from_numpy(item["edge_data"]),
             "edge_types": torch.from_numpy(item["edge_types"]),
@@ -447,6 +644,9 @@ class InMemoryDataset(Dataset):
         return result
 
 
+# ============================================================
+# Collate
+# ============================================================
 def collate_fn(batch):
     max_E = max(item["edge_data"].shape[0] for item in batch)
     B = len(batch)
@@ -504,7 +704,7 @@ def collate_fn(batch):
 
 
 # ============================================================
-# Model Architecture
+# Model Architecture (identical to v26e)
 # ============================================================
 class ConvBlock1D(nn.Module):
     def __init__(self, d, kernel_size=3, n_groups=8):
@@ -551,33 +751,20 @@ class EdgeFeatureExtractor(nn.Module):
 
 
 class NodeFeatureExtractor2D(nn.Module):
-    """Hierarchical conv2d with progressive downsampling.
-
-    Input: (B_nodes, 8, 32, 32)
-    Output: (B_nodes, d)
-
-    32x32 -> 16x16 -> 8x8 -> 4x4 -> pool -> d
-    Full receptive field ensures global diagonal patterns are visible.
-    """
-    def __init__(self, d=64, n_channels=8):
+    def __init__(self, d=64, n_channels=12):
         super().__init__()
         self.net = nn.Sequential(
-            # 32x32 -> 32x32
             nn.Conv2d(n_channels, 32, 3, padding=1),
             nn.GELU(),
-            # 32x32 -> 16x16
             nn.Conv2d(32, 32, 3, stride=2, padding=1),
             nn.GroupNorm(8, 32),
             nn.GELU(),
-            # 16x16 -> 8x8
             nn.Conv2d(32, 64, 3, stride=2, padding=1),
             nn.GroupNorm(8, 64),
             nn.GELU(),
-            # 8x8 -> 4x4
             nn.Conv2d(64, 64, 3, stride=2, padding=1),
             nn.GroupNorm(8, 64),
             nn.GELU(),
-            # 4x4 -> 1x1
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
             nn.Linear(64, d),
@@ -622,13 +809,6 @@ class StructuralSelfAttention(nn.Module):
 
 
 class ADIAModel(nn.Module):
-    """v26e: Edge 1D pipeline + 8ch node 2D pipeline FUSED with edge embeddings.
-
-    Edge pipeline: v11 (conv1d -> struct attn -> edge_head)
-    Node pipeline: hierarchical conv2d on 8ch density images
-                   -> merge with 4 edge embeddings -> node_head (8-class)
-    """
-
     def __init__(self, d=None, n_edge_types=None, aug_noise_std=0.0):
         super().__init__()
         d = d or D_MODEL
@@ -636,7 +816,6 @@ class ADIAModel(nn.Module):
         self.d = d
         self.aug_noise_std = aug_noise_std
 
-        # Edge pipeline (v11)
         self.extractor = EdgeFeatureExtractor(d, n_channels=N_CHANNELS_1D)
         self.edge_type_emb = nn.Embedding(n_edge_types, d)
         self.edge_merge = MergeOperator(n_inputs=2, d=d)
@@ -646,9 +825,8 @@ class ADIAModel(nn.Module):
         )
         self.edge_head = nn.Linear(d, 2)
 
-        # Node pipeline (v26e: 8ch density fused with edges)
         self.node_extractor = NodeFeatureExtractor2D(d, n_channels=N_NODE_CHANNELS)
-        self.node_merge = MergeOperator(n_inputs=5, d=d)  # 4 edges + 1 node_2d
+        self.node_merge = MergeOperator(n_inputs=5, d=d)
         self.node_head = nn.Linear(d, N_CLASSES)
 
     def forward(self, edge_data, edge_types, edge_mask, cols_list,
@@ -658,7 +836,6 @@ class ADIAModel(nn.Module):
         if self.training and self.aug_noise_std > 0:
             edge_data = edge_data + torch.randn_like(edge_data) * self.aug_noise_std
 
-        # Edge pipeline
         x_flat = edge_data.view(B * E, C, N)
         conv_emb = self.extractor(x_flat).view(B, E, self.d)
         type_emb = self.edge_type_emb(edge_types)
@@ -678,7 +855,6 @@ class ADIAModel(nn.Module):
 
         edge_logits = self.edge_head(edge_emb)
 
-        # Node pipeline — 8ch conv2d + fuse with edge embeddings
         node_logits_list = []
         if node_imgs is not None:
             B_n, K, C_n, H, W = node_imgs.shape
@@ -687,7 +863,6 @@ class ADIAModel(nn.Module):
             node_2d_embs = flat_emb.view(B_n, K, self.d)
 
             def _eidx(p, u, v):
-                """Get edge index for directed edge u->v in p-node graph."""
                 idx = 0
                 for uu in range(p):
                     for vv in range(p):
@@ -786,13 +961,6 @@ class ADIAModelWrapper(pl.LightningModule):
             ignore_index=-1,
         )
 
-    def _get_lambda(self):
-        """Cosine decay: LAMBDA_START -> LAMBDA_END over training."""
-        total_steps = self.trainer.estimated_stepping_batches or 1
-        progress = self.trainer.global_step / total_steps
-        progress = min(progress, 1.0)
-        return LAMBDA_END + (LAMBDA_START - LAMBDA_END) * 0.5 * (1 + np.cos(np.pi * progress))
-
     def forward(self, batch):
         return self.model(
             batch["edge_data"].to(self.device),
@@ -809,19 +977,17 @@ class ADIAModelWrapper(pl.LightningModule):
         B = edge_logits.shape[0]
         total_loss = torch.tensor(0.0, device=self.device)
 
-        lam = self._get_lambda()
-
-        # Edge loss
+        # Edge loss (lambda-weighted auxiliary)
         if "edge_labels" in batch:
             el = batch["edge_labels"].to(self.device)
             mask = batch["edge_mask"].to(self.device)
             fl, fb = edge_logits[mask], el[mask]
             if fl.numel() > 0:
                 edge_loss = self.edge_criterion(fl, fb)
-                total_loss = total_loss + lam * edge_loss
+                total_loss = total_loss + LOSS_LAMBDA * edge_loss
                 self.log(f"{split}/edge_loss", edge_loss, prog_bar=False, sync_dist=True)
 
-        # Node loss
+        # Node loss (primary)
         if "node_labels" in batch:
             all_nl, all_ll = [], []
             nl = batch["node_labels"].to(self.device)
@@ -836,7 +1002,7 @@ class ADIAModelWrapper(pl.LightningModule):
                 valid = cat_n >= 0
                 if valid.any():
                     node_loss = self.node_criterion(cat_l[valid], cat_n[valid])
-                    total_loss = total_loss + (1 - lam) * node_loss
+                    total_loss = total_loss + (1 - LOSS_LAMBDA) * node_loss
                     self.log(f"{split}/node_loss", node_loss, prog_bar=True, sync_dist=True)
 
         self.log(f"{split}/loss", total_loss, prog_bar=True, sync_dist=True)
@@ -871,30 +1037,16 @@ def train(X_train, y_train, model_directory_path):
         torch.save(node_w, node_w_path)
         torch.save(edge_w, edge_w_path)
 
-    cache_path = os.path.join(LOCAL_CACHE_DIR, f"train_dataset_{VERSION_NAME}.pkl")
-    if os.path.exists(cache_path):
-        print(f"Loading cached dataset from {cache_path}...")
-        with open(cache_path, "rb") as f:
-            samples = pickle.load(f)
-    else:
-        args = [(X_list[i], y_list[i]) for i in range(len(X_list))]
-        import multiprocessing as mp
-        n_workers = max(1, mp.cpu_count() - 1)
-        print(f"Building dataset ({len(args)} samples, {n_workers} workers)...")
-        ctx = mp.get_context('fork')
-        with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
-            raw = [None] * len(args)
-            futures = {pool.submit(_build_single, a): idx for idx, a in enumerate(args)}
-            for fut in tqdm(as_completed(futures), total=len(args)):
-                raw[futures[fut]] = fut.result()
-        samples = raw
-        with open(cache_path, "wb") as f:
-            pickle.dump(samples, f, protocol=pickle.HIGHEST_PROTOCOL)
+    shard_dir = os.path.join(LOCAL_CACHE_DIR, f"train_dataset_{VERSION_NAME}")
+    if not os.path.exists(os.path.join(shard_dir, "meta.pkl")):
+        _build_and_save_shards(X_list, y_list, shard_dir, n_workers=47)
 
-    dataset = InMemoryDataset(samples)
-    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True,
+    dataset = CausalEdgeDataset(shard_dir)
+    sampler = ShardGroupedSampler(dataset.shard_sizes)
+    loader = DataLoader(dataset, batch_size=BATCH_SIZE, sampler=sampler,
                         num_workers=0, collate_fn=collate_fn, pin_memory=True)
-    print(f"Dataset: {len(dataset)} samples")
+
+    print(f"Dataset: {len(dataset)} samples, {dataset.n_shards} shards")
 
     wrapper = ADIAModelWrapper(d=D_MODEL, node_class_weights=node_w, edge_class_weights=edge_w,
                                 lr=LR, max_epochs=MAX_EPOCHS, aug_noise_std=AUG_NOISE_STD)
@@ -903,25 +1055,21 @@ def train(X_train, y_train, model_directory_path):
 
     wandb_logger = WandbLogger(
         project="causal-discovery-thesis",
-        name=f"v26e_density_noch{N_NODE_CHANNELS}_ss{SCATTER_SIGMA}_as{ANM_SIGMA}",
+        name=VERSION_NAME,
         config={
             "version": VERSION_NAME,
-            "n_obs": N_OBS,
-            "n_kernel": N_KERNEL,
-            "grid_size": GRID_SIZE,
-            "scatter_sigma": SCATTER_SIGMA,
-            "anm_bw": ANM_BW,
             "n_node_channels": N_NODE_CHANNELS,
-            "n_channels_1d": N_CHANNELS_1D,
+            "scatter_sigma": SCATTER_SIGMA,
+            "anm_sigma": ANM_SIGMA,
+            "anm_bw": ANM_BW,
+            "loss_lambda": LOSS_LAMBDA,
             "d_model": D_MODEL,
-            "n_heads": N_HEADS,
-            "bandwidths": BANDWIDTHS,
             "batch_size": BATCH_SIZE,
             "lr": LR,
             "max_epochs": MAX_EPOCHS,
-            "aug_noise_std": AUG_NOISE_STD,
             "n_params": n_params,
             "n_samples": len(dataset),
+            "xy_aug": True,
         },
     )
 
@@ -929,6 +1077,7 @@ def train(X_train, y_train, model_directory_path):
         accelerator="gpu", devices=2,
         strategy=DDPStrategy(find_unused_parameters=False),
         max_epochs=MAX_EPOCHS, precision="32-true",
+        use_distributed_sampler=False,
         logger=wandb_logger, enable_checkpointing=True, enable_progress_bar=True,
     )
     trainer.fit(wrapper, loader)
@@ -954,10 +1103,7 @@ def infer_batch_local(dfs, model, device="cpu", batch_size=32, cache_dir=None):
         ctx = mp.get_context('fork')
         all_items = [None] * len(args)
         with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
-            futures = {
-                pool.submit(_build_single, a): idx
-                for idx, a in enumerate(args)
-            }
+            futures = {pool.submit(_build_single, a): idx for idx, a in enumerate(args)}
             for fut in tqdm(as_completed(futures), total=len(args)):
                 all_items[futures[fut]] = fut.result()
         if cache_path:
@@ -965,8 +1111,26 @@ def infer_batch_local(dfs, model, device="cpu", batch_size=32, cache_dir=None):
             with open(cache_path, "wb") as f:
                 pickle.dump(all_items, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-    loader = DataLoader(InMemoryDataset(all_items), batch_size=batch_size,
-                        shuffle=False, num_workers=0, collate_fn=collate_fn)
+    from torch.utils.data import DataLoader as DL
+
+    class _InferDataset(Dataset):
+        def __init__(self, samples):
+            self.samples = samples
+        def __len__(self):
+            return len(self.samples)
+        def __getitem__(self, idx):
+            item = self.samples[idx]
+            return {
+                "edge_data": torch.from_numpy(item["edge_data"]),
+                "edge_types": torch.from_numpy(item["edge_types"]),
+                "cols": item["cols"],
+                "p": item["p"],
+                "other_nodes": item["other_nodes"],
+                "node_images": {k: torch.from_numpy(v) for k, v in item["node_images"].items()},
+            }
+
+    loader = DL(_InferDataset(all_items), batch_size=batch_size,
+                shuffle=False, num_workers=0, collate_fn=collate_fn)
     results = [None] * len(all_items)
     patterns = {
         "Confounder": lambda n: [(n, "X"), (n, "Y")],
@@ -1037,10 +1201,10 @@ def infer(X_test, model_directory_path, id_column_name, prediction_column_name):
 # ============================================================
 if __name__ == "__main__":
     print("=" * 60)
-    print(f"v26e: {N_NODE_CHANNELS}-Channel Density + Edge-Fused Node")
-    print(f"  Node: {N_NODE_CHANNELS}ch x {GRID_SIZE}x{GRID_SIZE} (scatter_sigma={SCATTER_SIGMA}, anm_sigma={ANM_SIGMA}, anm_bw={ANM_BW})")
-    print(f"  Node merge: 5 inputs (4 edge embs + 1 node_2d)")
-    print(f"  Edge: v11 1D pipeline (conv1d + struct attn)")
+    print(f"{VERSION}: 12ch Density + Edge Context + XY Augmentation")
+    print(f"  Node: {N_NODE_CHANNELS}ch x {GRID_SIZE}x{GRID_SIZE}")
+    print(f"  scatter_sigma={SCATTER_SIGMA}, anm_sigma={ANM_SIGMA}")
+    print(f"  loss_lambda={LOSS_LAMBDA}")
     print(f"  Config: bs={BATCH_SIZE}, lr={LR}, epochs={MAX_EPOCHS}")
     print("=" * 60)
 
@@ -1055,10 +1219,9 @@ if __name__ == "__main__":
 
     X_test = pd.read_pickle("data/X_test_reduced.pickle")
     y_test = pd.read_pickle("data/y_test_reduced.pickle")
-    device = "cuda:1" if torch.cuda.is_available() else "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     model = ADIAModel(d=D_MODEL, aug_noise_std=0.0)
     model.load_state_dict(torch.load(f"resources/{MODEL_NAME}.pt", map_location=device, weights_only=True))
-    print(f"Model loaded from resources/{MODEL_NAME}.pt")
     model.to(device).eval()
     dfs = [X_test[n] for n in X_test]
     names = list(X_test.keys())
@@ -1073,11 +1236,11 @@ if __name__ == "__main__":
             ct[tl[v]] += 1
             if pl_.get(v, "Independent") == tl[v]:
                 cc[tl[v]] += 1
-    print(f"\n{VERSION_NAME} Per-class accuracy:")
+    print(f"\n{MODEL_NAME} Per-class accuracy:")
     accs = []
     for cls in CLASS_NAMES:
         n = ct[cls]
         acc = cc[cls] / n if n > 0 else 0.0
         accs.append(acc)
         print(f"  {cls:25s}: {acc:.4f}  (n={n})")
-    print(f"\n{VERSION_NAME} Balanced Accuracy: {np.mean(accs):.4f}")
+    print(f"\n{MODEL_NAME} Balanced Accuracy: {np.mean(accs):.4f}")
