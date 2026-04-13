@@ -1,0 +1,792 @@
+% \chapter{Thực nghiệm và đánh giá}
+% \label{chap:experiment}
+% \paragraph{Đối với các KLTN giải quyết bài toán nghiên cứu:}
+
+% \begin{itemize}
+%     \item Chương này thường có tiêu đề ``Thực nghiệm và đánh giá''
+%     \item Các nội dung chính cần trình bày:
+%     \begin{itemize}
+%         \item Câu hỏi nghiên cứu
+%         \item Dữ liệu và thiết lập thực nghiệm
+%         \item Các phương pháp đối sánh
+%         \item Độ đo đánh giá
+%         \item Kết quả thực nghiệm
+%         \item Phân tích và thảo luận kết quả
+%     \end{itemize}
+% \end{itemize}
+
+
+% \paragraph{Đối với các KTLN xây dựng hệ thống:}
+
+% \begin{itemize}
+%     \item Chương này thường có tiêu đề ``Cài đặt, kiểm thử và triển khai hệ thống''
+%     \begin{itemize}
+%         \item Các nội dung chính cần trình bày:
+%         \begin{itemize}
+%             \item Môi trường triển khai và cài đặt
+%             \item Kịch bản kiểm thử
+%             \item Kết quả kiểm thử
+%             \item Phân tích và thảo luận kết quả
+%         \end{itemize}
+%     \end{itemize}
+% \end{itemize}
+
+% \textit{\textbf{Lưu ý:}} Sinh viên cần mô tả phần mình cài đặt, phân tách với phần reuse
+
+% \section{}
+
+% \chapter{Thực nghiệm và đánh giá}
+% \label{chap:experiments}
+
+% Chương này mô tả toàn bộ thiết lập thực nghiệm: bộ dữ liệu, môi trường phần cứng/phần mềm,
+% quy trình đánh giá cục bộ (local evaluation), quy trình nộp bài lên nền tảng CrunchDAO,
+% và các thí nghiệm so sánh giữa baseline và các cải tiến được đề xuất ở Chương~\ref{chap:method}.
+
+% % =====================================================================
+% \section{Bộ dữ liệu}
+% \label{sec:dataset}
+% % =====================================================================
+
+% \subsection{Nguồn dữ liệu}
+
+% Toàn bộ thực nghiệm sử dụng bộ dữ liệu chính thức từ
+% ADIA Lab Causal Discovery Challenge~\cite{crunchdao_adia_docs, crunchdao_causal_2024}.
+% Theo báo cáo chính thức của ban tổ chức~\cite{olivetti2025adialab},
+% cuộc thi sử dụng tổng cộng 47,000 dataset được phân chia thành
+% khoảng 25,000 dataset huấn luyện và 22,000 dataset kiểm tra
+% (chia tiếp thành public test set và private test set).
+% Thông qua nền tảng CrunchDAO, luận văn truy cập được
+% tập huấn luyện gồm \textbf{23,500 dataset instances}
+% và tập kiểm tra gồm \textbf{1,880 dataset instances} (public test set).
+% Cả hai tập đều \textit{không đi kèm nhãn lớp trực tiếp};
+% thay vào đó, mỗi dataset instance được cung cấp kèm một
+% \textbf{ma trận kề} (adjacency matrix) $\mathbf{A} \in \{0,1\}^{p \times p}$
+% biểu diễn DAG nhân quả thật của dataset đó,
+% trong đó $\mathbf{A}_{ij} = 1$ nếu tồn tại cạnh có hướng $i \to j$.
+
+% \subsection{Dẫn xuất nhãn từ ma trận kề}
+% \label{subsec:label_derivation}
+
+% Nhãn 8 lớp cho mỗi biến $K$ được dẫn xuất từ ma trận kề $\mathbf{A}$
+% bằng cách phân tích cấu trúc cục bộ của $K$ trong đồ thị đối với cặp $(X, Y)$.
+% Cụ thể, với mỗi biến $K \neq X, K \neq Y$, ta kiểm tra bốn bit:
+% $\mathbf{A}_{K,X}$ (có cạnh $K \to X$),
+% $\mathbf{A}_{X,K}$ (có cạnh $X \to K$),
+% $\mathbf{A}_{K,Y}$ (có cạnh $K \to Y$),
+% và $\mathbf{A}_{Y,K}$ (có cạnh $Y \to K$).
+% Từ bốn bit này, nhãn lớp của $K$ được xác định theo Bảng~\ref{tab:label_rules}:
+
+% \begin{table}[h]
+% \centering
+% \caption{Quy tắc dẫn xuất nhãn từ ma trận kề cho biến $K$.}
+% \label{tab:label_rules}
+% \begin{tabular}{lcccc}
+% \hline
+% \textbf{Nhãn} & $K{\to}X$ & $X{\to}K$ & $K{\to}Y$ & $Y{\to}K$ \\
+% \hline
+% Confounder       & 1 & 0 & 1 & 0 \\
+% Mediator         & 0 & 1 & 1 & 0 \\
+% Collider         & 0 & 1 & 0 & 1 \\
+% Independent      & 0 & 0 & 0 & 0 \\
+% Cause of X       & 1 & 0 & 0 & 0 \\
+% Consequence of X & 0 & 1 & 0 & 0 \\
+% Cause of Y       & 0 & 0 & 1 & 0 \\
+% Consequence of Y & 0 & 0 & 0 & 1 \\
+% \hline
+% \end{tabular}
+% \end{table}
+
+% Bước dẫn xuất nhãn được thực hiện một lần trong bước tiền xử lý
+% và kết quả được lưu lại để dùng cho huấn luyện.
+% Với tập kiểm tra (1,880 instances), ma trận kề thật không được công khai --
+% hệ thống CrunchDAO tự dẫn xuất nhãn từ phía sau để tính điểm khi nộp bài.
+
+% \begin{figure}[h]
+%     \centering
+%     \includegraphics[width=0.6\linewidth]{figures/label_derivation.png}
+%     \caption{Quy trình dẫn xuất nhãn từ ma trận kề $\mathbf{A}$:
+%              với mỗi biến $K$, kiểm tra bốn cạnh liên quan đến $X$ và $Y$
+%              rồi tra cứu theo bảng quy tắc để xác định lớp.}
+%     \label{fig:label_derivation}
+% \end{figure}
+
+% \subsection{Cấu trúc dữ liệu}
+
+% Mỗi \textit{dataset instance} gồm hai thành phần:
+% (1) ma trận quan sát $\mathbf{D} \in \mathbb{R}^{1000 \times p}$ với $p \in \{3,\ldots,10\}$ biến,
+% và (2) ma trận kề $\mathbf{A} \in \{0,1\}^{p \times p}$ của DAG nhân quả thật.
+% Hai biến $X$ và $Y$ được đánh dấu sẵn trong metadata,
+% với $\mathbf{A}_{X,Y} = 1$ theo giả định bài toán.
+% Tổng số cặp $(K, \text{nhãn})$ trong tập huấn luyện lớn hơn 23,500
+% vì mỗi dataset với $p > 3$ đóng góp nhiều hơn một biến $K$.
+
+% \subsection{Sinh dữ liệu tổng hợp}
+
+% Theo~\cite{olivetti2025adialab}, dữ liệu được sinh từ SCM với quan hệ nhân quả phi tuyến
+% (mạng nơ-ron, Gaussian Process, mô hình Bayesian) trên sáu loại đồ thị tổng hợp
+% (Hierarchical, Bipartite, Erd\H{o}s-R\'enyi, Low-rank, Scale-free, Preferential Attachment)
+% và đồ thị thực tế từ mạng lưới thức ăn.
+% Đầu ra được chuẩn hóa về $[-1, +1]$ để tránh lộ thông tin cấu trúc qua phương sai.
+% Phân tích hậu kỳ cho thấy đồ thị Hierarchical dễ nhận diện nhất,
+% trong khi Preferential Attachment là khó nhất xuyên suốt tất cả các giải pháp~\cite{olivetti2025adialab}.
+
+% \subsection{Đặc điểm phân phối nhãn}
+
+% Tám lớp không phân bố đều trong tập huấn luyện.
+% Các lớp như Independent, Cause of X, và Consequence of Y có xu hướng xuất hiện nhiều hơn,
+% trong khi Mediator và Collider có số lượng mẫu ít hơn đáng kể.
+% Sự mất cân bằng này là lý do trực tiếp cho việc sử dụng trọng số nghịch đảo tần suất
+% trong hàm mất mát (~\ref{sec:loss}) và Balanced Accuracy làm độ đo đánh giá.
+
+% % =====================================================================
+% \section{Môi trường thực nghiệm}
+% \label{sec:environment}
+% % =====================================================================
+
+% \subsection{Phần cứng}
+
+% Toàn bộ thực nghiệm được thực hiện trên máy chủ với cấu hình: hai GPU NVIDIA RTX 5880 (48GB VRAM), CPU 48 nhân để song song hóa tiền xử lý edge tensor, và 251 GB RAM để lưu toàn bộ tập huấn luyện đã tiền xử lý trong bộ nhớ. Các thí nghiệm đầu (v2 đến v8b base) chạy trên một GPU A100 40GB; các thí nghiệm với tập XY augmentation (${\sim}263$K mẫu) chạy trên hai GPU RTX 5880 theo chế độ DDP (Distributed Data Parallel) do kích thước tập dữ liệu vượt bộ nhớ đơn GPU. v4 (dual-path transformer) phải chạy trên A100 80GB do OOM trên 40GB. Bước tiền xử lý (xây dựng edge tensor) được song song hóa trên CPU qua \texttt{ProcessPoolExecutor}; bước huấn luyện mô hình chạy trên GPU.
+
+% \subsection{Phần mềm và thư viện}
+
+% Môi trường lập trình sử dụng Python với các thư viện chính:
+% PyTorch và PyTorch Lightning cho xây dựng và huấn luyện mô hình học sâu,
+% NumPy và SciPy cho tiền xử lý và tính toán thống kê (bao gồm kernel regression và ANM residuals),
+% và thư viện CrunchDAO client để tải dữ liệu và nộp bài.
+% Các file thực nghiệm chính: \texttt{v8b\_anm.py} (base v8b), \texttt{v8b\_anm\_xyaug.py} (v8b+),
+% \texttt{v11\_structbias.py} (v11 base), \texttt{v11\_xyaug.py} (v11+);
+% script đánh giá cục bộ là \texttt{evaluate.py}.
+
+% % =====================================================================
+% \section{Quy trình đánh giá}
+% \label{sec:evaluation}
+% % =====================================================================
+
+% \subsection{Đánh giá cục bộ (Local Evaluation)}
+% \label{subsec:local_eval}
+
+% Để đánh giá nhanh các thay đổi kiến trúc và siêu tham số mà không cần nộp bài,
+% luận văn xây dựng quy trình đánh giá cục bộ dựa trên một tập kiểm tra cục bộ
+% ($y\_\text{test}$) được lưu dưới dạng file pickle.
+% Script \texttt{evaluate.py} tính Balanced Accuracy theo công thức~\eqref{eq:balanced_acc}
+% trên tập này, cho phép so sánh nhanh giữa các lần thực nghiệm.
+
+% Balanced Accuracy được tính như sau:
+% \begin{equation}
+%     \mathrm{BA}_{\mathrm{local}} = \frac{1}{C}\sum_{c=1}^{C}
+%     \frac{\sum_{i} \mathbb{1}[\hat{y}_i = c \wedge y_i = c]}
+%          {\sum_{i} \mathbb{1}[y_i = c]},
+%     \label{eq:local_ba}
+% \end{equation}
+% tức là trung bình của recall (sensitivity) trên tất cả $C = 8$ lớp.
+% Ưu điểm của Balanced Accuracy là nó không bị ảnh hưởng bởi mất cân bằng lớp:
+% một lớp có 100 mẫu và một lớp có 1000 mẫu đóng góp như nhau vào điểm số.
+
+% Quy trình đánh giá cục bộ được dùng như vòng lặp phát triển chính:
+% thay đổi $\to$ huấn luyện $\to$ đánh giá local $\to$ quyết định có nộp bài không.
+% Chỉ những cấu hình cho local score cải thiện đáng kể so với baseline mới được nộp lên CrunchDAO.
+
+% \subsection{Đánh giá trên nền tảng CrunchDAO (Public Leaderboard)}
+% \label{subsec:crunchdao_submit}
+
+% Nền tảng CrunchDAO~\cite{crunchdao_competition} cung cấp môi trường chạy mô hình
+% trong một sandbox cô lập: người dùng nộp một notebook Python (không phải file dự đoán),
+% hệ thống tự động chạy notebook này trên tập test ẩn và tính điểm Balanced Accuracy.
+
+% Để tương thích với môi trường sandbox, notebook sử dụng pragma đặc biệt
+% \texttt{\# @crunch/keep:on} để đánh dấu các cell cần giữ lại global variables
+% (bao gồm model weights và preprocessed data) giữa các bước chạy,
+% tránh việc tính toán lại từ đầu và vượt qua giới hạn thời gian chạy.
+
+% Điểm số trên public leaderboard (gọi tắt là \textit{public score}) là số liệu
+% chính thức để so sánh với các đội khác trong cuộc thi.
+% Tuy nhiên do giới hạn số lần nộp bài mỗi ngày,
+% local score (~\ref{subsec:local_eval}) được dùng là chỉ số phát triển chính,
+% và public score được dùng để xác nhận cuối cùng.
+
+% Trong thực nghiệm, có sự chênh lệch nhỏ giữa local score và public score
+% do phân phối tập test có thể khác một chút so với tập local:
+% baseline đạt \textbf{73.96\%} local nhưng \textbf{73.61\%} public.
+% Điều này cho thấy local evaluation là proxy tốt nhưng không hoàn hảo,
+% và cần lưu ý không overfit theo local score.
+
+% % =====================================================================
+% \section{Thiết lập thí nghiệm}
+% \label{sec:exp_setup}
+% % =====================================================================
+
+% \subsection{Cấu hình baseline}
+
+% Baseline được xác định là cài đặt lại giải pháp hạng nhất~\cite{adia_rank1_report}
+% với cấu hình tìm được qua tìm kiếm siêu tham số:
+
+% \begin{table}[h]
+% \centering
+% \caption{Cấu hình siêu tham số của mô hình baseline.}
+% \label{tab:baseline_config}
+% \begin{tabular}{lc}
+% \hline
+% \textbf{Siêu tham số} & \textbf{Giá trị} \\
+% \hline
+% Batch size                    & 16        \\
+% Learning rate (khởi đầu)      & $10^{-3}$ \\
+% Số epoch huấn luyện           & 20        \\
+% Kích thước tập huấn luyện     & 23,500    \\
+% $N_\mathrm{kernel}$           & 1,000     \\
+% Số kênh ẩn (Conv1D)           & 64        \\
+% Số khối Residual              & 5         \\
+% Số lớp Self-Attention         & 2         \\
+% Thuật toán tối ưu             & AdamW     \\
+% Learning rate schedule        & Cosine annealing \\
+% \hline
+% \end{tabular}
+% \end{table}
+
+% \subsection{Các thí nghiệm đề xuất}
+
+% Các thí nghiệm được thiết kế theo nguyên tắc \textit{ablation}: mỗi thí nghiệm
+% thay đổi một hoặc một nhóm thành phần liên quan so với baseline,
+% giữ nguyên tất cả các thành phần còn lại.
+% Điều này cho phép quy kết rõ ràng sự thay đổi về điểm số cho từng cải tiến cụ thể.
+
+% Bảng~\ref{tab:experiments} liệt kê toàn bộ 15 thí nghiệm được thực hiện:
+
+% \begin{table}[h]
+% \centering
+% \caption{Danh sách các thí nghiệm và thay đổi so với baseline.}
+% \label{tab:experiments}
+% \begin{tabular}{llp{7.5cm}}
+% \hline
+% \textbf{Ver.} & \textbf{Tên} & \textbf{Thay đổi so với baseline v2} \\
+% \hline
+% v2   & Baseline tái hiện       & 3 kênh: sorted\_u, sorted\_v, kernel coeff ($h{=}0.5$) \\
+% v3   & Broadcast channels      & Broadcast partial\_corr và resid\_asym vào kênh 4--5 \\
+% v3+  & Obs cross-attention     & v3 + cross-attention trên 1000 quan sát thô \\
+% v4   & Dual-path transformer   & Hai nhánh song song (edge conv + obs attention), bidirectional \\
+% v5   & StatProjector MLP       & Partial corr + resid asym qua MLP riêng, inject tại merge \\
+% v5m  & Multi-bw kernel         & 5 kênh: 2 sorted + kernel tại $h \in \{0.2, 0.5, 1.0\}$ \\
+% v5a  & v5m + XY aug            & v5m huấn luyện trên ${\sim}263$K mẫu XY remap \\
+% v6   & Structure-conditioned   & 2-stage: dự đoán cấu trúc, sau đó attention có điều kiện \\
+% v8b  & 8ch ANM                 & 5 kênh kernel đa bw + 3 kênh phần dư ANM đa bw \\
+% v8b+ & v8b + XY aug            & v8b huấn luyện trên ${\sim}263$K mẫu XY remap \\
+% v9   & Node-centric            & Luồng tính toán theo node thay vì edge \\
+% v9d  & Dual-stream node        & v9 + nhánh thứ hai từ edge context \\
+% v10  & LightGBM tabular        & Đặc trưng thống kê thủ công, gradient boosting \\
+% v11  & Structural bias         & v8b + attention bias mã hóa quan hệ tô-pô giữa các cạnh \\
+% v11+ & v11 + XY aug            & v11 huấn luyện trên ${\sim}263$K mẫu XY remap \\
+% \hline
+% \end{tabular}
+% \end{table}
+
+% \subsection{Độ đo đánh giá chi tiết theo lớp}
+
+% Ngoài Balanced Accuracy tổng thể, luận văn còn theo dõi
+% \textit{per-class recall} (độ nhạy từng lớp) để phân tích chi tiết:
+% \begin{equation}
+%     \mathrm{Recall}_c = \frac{\mathrm{TP}_c}{\mathrm{TP}_c + \mathrm{FN}_c},
+% \end{equation}
+% đặc biệt quan tâm đến hai lớp yếu nhất trong baseline: Mediator (${\sim}56\%$) và Collider (${\sim}63\%$).
+% Confusion matrix đầy đủ $8 \times 8$ cũng được phân tích để hiểu
+% các lỗi phân loại phổ biến nhất (ví dụ: Mediator bị nhầm thành lớp nào).
+
+% % =====================================================================
+% \section{Kết quả thực nghiệm}
+% \label{sec:results}
+% % =====================================================================
+
+% \subsection{Kết quả baseline}
+
+% Bảng~\ref{tab:baseline_results} trình bày kết quả baseline trên local evaluation
+% và public leaderboard, kèm theo per-class recall trên tập local.
+
+% \begin{table}[h]
+% \centering
+% \caption{Kết quả baseline: per-class recall trên tập local và Balanced Accuracy tổng thể.}
+% \label{tab:baseline_results}
+% \begin{tabular}{lc}
+% \hline
+% \textbf{Lớp} & \textbf{Recall (local)} \\
+% \hline
+% Confounder        & ${\sim}70\%$ \\
+% Mediator          & ${\sim}56\%$ \\
+% Collider          & ${\sim}63\%$ \\
+% Independent       & ${\sim}85\%$ \\
+% Cause of X        & ${\sim}74\%$ \\
+% Consequence of X  & ${\sim}76\%$ \\
+% Cause of Y        & ${\sim}75\%$ \\
+% Consequence of Y  & ${\sim}78\%$ \\
+% \hline
+% \textbf{Balanced Accuracy (local)}  & \textbf{73.96\%} \\
+% \textbf{Balanced Accuracy (public)} & \textbf{73.61\%}  \\
+% \hline
+% \end{tabular}
+% \end{table}
+
+% Để tham chiếu, Bảng~\ref{tab:rank1_perclass} trình bày kết quả per-class chính thức của
+% giải pháp hạng nhất và supervised baseline do ban tổ chức công bố~\cite{olivetti2025adialab}.
+
+% \begin{table}[h]
+% \centering
+% \caption{Per-class accuracy (\%) của giải pháp hạng nhất và supervised baseline
+%          trên private test set (nguồn:~\cite{olivetti2025adialab}).}
+% \label{tab:rank1_perclass}
+% \begin{tabular}{lcc}
+% \hline
+% \textbf{Lớp} & \textbf{Rank 1 (76.70\%)} & \textbf{Supervised Baseline (39.68\%)} \\
+% \hline
+% Confounder       & 73.19 & 18.60 \\
+% Collider         & 70.17 & 43.65 \\
+% Mediator         & 65.67 & 13.89 \\
+% Cause of X       & 79.35 & 50.88 \\
+% Cause of Y       & 81.68 & 62.51 \\
+% Consequence of X & 76.53 & 26.74 \\
+% Consequence of Y & 80.80 & 45.04 \\
+% Independent      & 86.18 & 56.12 \\
+% \hline
+% \end{tabular}
+% \end{table}
+
+% \subsection{So sánh các cải tiến}
+
+% Bảng~\ref{tab:comparison} tổng hợp kết quả của tất cả các thí nghiệm
+% trên local evaluation. Cột ``$\Delta$'' là độ cải thiện so với baseline v2.
+
+% \begin{table}[h]
+% \centering
+% \caption{So sánh Balanced Accuracy (local và public) giữa tất cả các phiên bản mô hình.
+%          ``--'' biểu thị không nộp bài do không đạt threshold cải thiện.}
+% \label{tab:comparison}
+% \begin{tabular}{llccc}
+% \hline
+% \textbf{Ver.} & \textbf{Tên} & \textbf{BA local} & \textbf{$\Delta$} & \textbf{BA public} \\
+% \hline
+% v2   & Baseline (3ch)                        & 73.96\% & --          & 73.61\% \\
+% \hline
+% \multicolumn{5}{l}{\textit{Nhóm kiến trúc}} \\
+% v3   & 5ch broadcast                         & 72.46\% & $-1.50\%$   & 72.13\% \\
+% v3+  & 5ch + obs cross-attn                  & 72.06\% & $-1.90\%$   & 71.17\% \\
+% v4   & Dual-path transformer                 & 72.77\% & $-1.19\%$   & 68.76\% \\
+% v5   & StatProjector MLP                     & 73.57\% & $-0.39\%$   & 72.84\% \\
+% v6   & Structure-conditioned                 & 72.28\% & $-1.68\%$   & --      \\
+% v9   & Node-centric                          & 75.43\% & $+1.47\%$   & --      \\
+% v9d  & Dual-stream node                      & 75.65\% & $+1.69\%$   & --      \\
+% v10  & LightGBM                              & 63.11\% & $-10.85\%$  & --      \\
+% \hline
+% \multicolumn{5}{l}{\textit{Nhóm đặc trưng + dữ liệu}} \\
+% v5m  & Multi-bw kernel (5ch)                 & 75.44\% & $+1.48\%$   & 74.80\% \\
+% v5a  & v5m + XY aug                          & 77.91\% & $+3.95\%$   & 77.55\% \\
+% v8b  & 8ch (5 kernel + 3 ANM)                & 76.94\% & $+2.98\%$   & --      \\
+% v8b+ & v8b + XY aug                          & 80.26\% & $+6.30\%$   & 80.22\% \\
+% \hline
+% \multicolumn{5}{l}{\textit{Kiến trúc với inductive bias tô-pô}} \\
+% v11  & Structural attention bias             & 79.59\% & $+5.63\%$   & --      \\
+% \rowcolor{codeyellow}
+% v11+ & \textbf{v11 + XY aug}                 & \textbf{81.14\%} & $\mathbf{+7.18\%}$ & \textbf{80.82\%} \\
+% \hline
+% \multicolumn{5}{l}{\textit{Tham chiếu cuộc thi}} \\
+%      & Giải pháp hạng nhất~\cite{adia_rank1_report}  & -- & -- & 76.70\% \\
+%      & Giải pháp hạng ba~\cite{olivetti2025adialab}   & -- & -- & 74.06\% \\
+% \hline
+% \end{tabular}
+% \end{table}
+
+% \begin{figure}[h]
+%     \centering
+%     \includegraphics[width=0.75\linewidth]{figures/confusion_matrix_baseline.png}
+%     \caption{Confusion matrix $8 \times 8$ của mô hình baseline trên tập local.
+%              Hàng là nhãn thật, cột là nhãn dự đoán.}
+%     \label{fig:confusion_matrix}
+% \end{figure}
+
+% \begin{figure}[h]
+%     \centering
+%     \includegraphics[width=0.8\linewidth]{figures/perclass_results.png}
+%     \caption{Per-class recall của baseline và các cải tiến được đề xuất.}
+%     \label{fig:perclass_results}
+% \end{figure}
+
+% % \subsection{Phân tích theo loại đồ thị}
+
+% % Bên cạnh per-class recall, luận văn theo dõi Balanced Accuracy theo từng loại đồ thị sinh dữ liệu,
+% % dựa theo phân tích của~\cite{olivetti2025adialab}.
+% % Theo kết quả chính thức, đồ thị Hierarchical cho BA cao nhất (${\sim}84\%$ với rank 1)
+% % trong khi Preferential Attachment thấp nhất (${\sim}72\%$) -- khoảng cách này nhất quán
+% % trên tất cả các đội tham gia, cho thấy đây là đặc tính của cấu trúc đồ thị
+% % chứ không phải của thuật toán cụ thể~\cite{olivetti2025adialab}.
+
+% % \begin{table}[h]
+% % \centering
+% % \caption{Balanced Accuracy (\%) theo loại đồ thị của giải pháp hạng nhất
+% %          (nguồn:~\cite{olivetti2025adialab}) và kết quả luận văn.}
+% % \label{tab:by_graph_type}
+% % \begin{tabular}{lccc}
+% % \hline
+% % \textbf{Loại đồ thị} & \textbf{Rank 1 (76.70\%)} & \textbf{Baseline v2} & \textbf{v11+ (Best)} \\
+% % \hline
+% % Hierarchical         & 84.21 & -- & -- \\
+% % Bipartite            & 79.65 & -- & -- \\
+% % Sample (real-world)  & 77.20 & -- & -- \\
+% % Erdős-Rényi          & 79.56 & -- & -- \\
+% % Low-rank             & 78.59 & -- & -- \\
+% % Scale-free           & 79.21 & -- & -- \\
+% % Preferential Attach. & 72.12 & -- & -- \\
+% % \hline
+% % \end{tabular}
+% % \end{table}
+
+% \subsection{Phân tích lỗi}
+
+% Bên cạnh các con số tổng hợp, luận văn thực hiện phân tích confusion matrix
+% để hiểu các lỗi phân loại phổ biến nhất trong baseline.
+% Ví dụ điển hình:
+
+% \begin{itemize}
+%     \item Mediator hay bị nhầm thành Consequence of X (cả hai đều có $X \to K$).
+%     \item Collider hay bị nhầm thành Independent (cả hai đều có $X \perp K$ biên).
+%     \item Confounder hay bị nhầm thành Cause of X (cả hai đều có $K \to X$).
+% \end{itemize}
+
+% Với v8b + XY aug, tỉ lệ nhầm Collider $\to$ Independent giảm mạnh,
+% xác nhận rằng kênh ANM residual giúp mô hình phát hiện phụ thuộc có điều kiện
+% $X \not\perp K \mid Y$ đặc trưng của Collider.
+% Với v11+, phân tích 139 mẫu lỗi Mediator (chi tiết tại Chương~\ref{chap:results})
+% cho thấy ${\sim}57\%$ lỗi là do mô hình chỉ phát hiện một nửa chuỗi $X \to K \to Y$,
+% gợi ý hướng cải thiện tiếp theo với X/Y-aware chain bias.
+
+% \subsection{Phân tích kết quả kiến trúc (negative results)}
+
+% Tất cả các thay đổi kiến trúc thuần túy (v3, v3+, v4, v5, v6) đều cho kết quả
+% thấp hơn hoặc tương đương baseline.
+% Cross-attention branch (v3+) giảm $1.90\%$, dual-path transformer (v4) giảm $1.19\%$ local
+% nhưng giảm tới $4.01\%$ public do overfitting nghiêm trọng.
+% Kết quả này nhất quán với nhận định của~\cite{olivetti2025adialab} rằng
+% \textit{feature engineering và representation learning} là chìa khóa --
+% không phải tăng độ phức tạp kiến trúc thuần túy.
+
+% Tuy nhiên, v11 (structural attention bias) là ngoại lệ quan trọng:
+% đây là thay đổi kiến trúc duy nhất cho kết quả tích cực ($+5.63\%$ local so với v2,
+% $+2.65\%$ so với v8b có cùng kênh đầu vào).
+% Điểm mấu chốt là v11 không tăng độ phức tạp chung mà bổ sung
+% \textit{inductive bias tô-pô có động cơ nhân quả} vào cơ chế attention,
+% một chiến lược căn bản khác với v3+/v4.
+% Chương~\ref{chap:results} phân tích chi tiết cơ chế và ý nghĩa của sự khác biệt này.
+
+% % =====================================================================
+% \section*{Kết luận chương 4}
+% \addcontentsline{toc}{section}{Kết luận chương 4}
+% % =====================================================================
+
+% Chương 4 đã mô tả toàn bộ thiết lập thực nghiệm:
+% bộ dữ liệu 23,500 instances với nhãn dẫn xuất từ ma trận kề,
+% môi trường máy chủ hai GPU A100 và 48 nhân CPU,
+% quy trình đánh giá hai tầng (local + CrunchDAO public leaderboard),
+% và danh sách 15 thí nghiệm được thiết kế theo nguyên tắc ablation.
+% Kết quả tổng quan (Bảng~\ref{tab:comparison}) cho thấy sự phân hóa rõ ràng:
+% nhóm kiến trúc thuần túy thất bại, nhóm đặc trưng và dữ liệu thành công,
+% và v11 là trường hợp đặc biệt của kiến trúc với inductive bias.
+% Mô hình tốt nhất v11 + XY augmentation đạt $\mathbf{81.14\%}$ local / $\mathbf{80.82\%}$ public.
+% Phân tích chi tiết nguyên nhân của từng kết quả được trình bày trong Chương~\ref{chap:results}.
+
+\chapter{Experimental Setup and Evaluation}
+\label{chap:experiments}
+
+This chapter describes the complete experimental setup: the dataset, hardware and software environment, local evaluation procedure, CrunchDAO submission workflow, and the comparative experiments between the baseline and proposed improvements from Chapter~\ref{chap:method}.
+
+% =====================================================================
+\section{Dataset}
+\label{sec:dataset}
+% =====================================================================
+
+\subsection{Data Source}
+
+All experiments use the official dataset from the ADIA Lab Causal Discovery Challenge~\cite{crunchdao_adia_docs, crunchdao_causal_2024}. According to the official report by the organizers~\cite{olivetti2025adialab}, the competition uses a total of 47,000 datasets split into approximately 25,000 training datasets and 22,000 test datasets (further divided into public and private test sets). Through the CrunchDAO platform, this thesis accesses a training set of \textbf{23,500 dataset instances} and a test set of \textbf{1,880 dataset instances} (public test set). Neither set comes with direct class labels; instead, each dataset instance is accompanied by an \textbf{adjacency matrix} $\mathbf{A} \in \{0,1\}^{p \times p}$ representing the ground-truth causal DAG, where $\mathbf{A}_{ij} = 1$ if and only if a directed edge $i \to j$ exists.
+
+\subsection{Label Derivation from Adjacency Matrix}
+\label{subsec:label_derivation}
+
+The 8-class label for each variable $K$ is derived from the adjacency matrix $\mathbf{A}$ by analyzing the local structure of $K$ in the graph with respect to the pair $(X, Y)$. Specifically, for each variable $K \neq X, K \neq Y$, four bits are checked: $\mathbf{A}_{K,X}$ (edge $K \to X$), $\mathbf{A}_{X,K}$ (edge $X \to K$), $\mathbf{A}_{K,Y}$ (edge $K \to Y$), and $\mathbf{A}_{Y,K}$ (edge $Y \to K$). The class label of $K$ is determined from these four bits according to Table~\ref{tab:label_rules}:
+
+\begin{table}[h]
+\centering
+\caption{Label derivation rules from the adjacency matrix for variable $K$.}
+\label{tab:label_rules}
+\begin{tabular}{lcccc}
+\hline
+\textbf{Label} & $K{\to}X$ & $X{\to}K$ & $K{\to}Y$ & $Y{\to}K$ \\
+\hline
+Confounder       & 1 & 0 & 1 & 0 \\
+Mediator         & 0 & 1 & 1 & 0 \\
+Collider         & 0 & 1 & 0 & 1 \\
+Independent      & 0 & 0 & 0 & 0 \\
+Cause of X       & 1 & 0 & 0 & 0 \\
+Consequence of X & 0 & 1 & 0 & 0 \\
+Cause of Y       & 0 & 0 & 1 & 0 \\
+Consequence of Y & 0 & 0 & 0 & 1 \\
+\hline
+\end{tabular}
+\end{table}
+
+Label derivation is performed once during preprocessing and cached for use during training. For the test set (1,880 instances), the ground-truth adjacency matrices are not publicly available -- the CrunchDAO system derives labels internally when scoring submissions.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.6\linewidth]{figures/label_derivation.png}
+    \caption{Label derivation pipeline from adjacency matrix $\mathbf{A}$: for each variable $K$, check the four relevant edges to $X$ and $Y$, then look up the corresponding class in the rule table.}
+    \label{fig:label_derivation}
+\end{figure}
+
+\subsection{Dataset Structure}
+
+Each \textit{dataset instance} consists of two components: (1) an observation matrix $\mathbf{D} \in \mathbb{R}^{1000 \times p}$ with $p \in \{3,\ldots,10\}$ variables, and (2) an adjacency matrix $\mathbf{A} \in \{0,1\}^{p \times p}$ of the ground-truth causal DAG. The two variables $X$ and $Y$ are pre-identified in the metadata, with $\mathbf{A}_{X,Y} = 1$ by assumption. The total number of $(K, \text{label})$ pairs in the training set exceeds 23,500 since each dataset with $p > 3$ contributes more than one variable $K$.
+
+\subsection{Synthetic Data Generation}
+
+According to~\cite{olivetti2025adialab}, data is generated from SCMs with nonlinear causal relationships (neural networks, Gaussian Processes, Bayesian models) over six types of synthetic graphs (Hierarchical, Bipartite, Erd\H{o}s-R\'enyi, Low-rank, Scale-free, Preferential Attachment) and real-world food-web graphs. Output is normalized to $[-1, +1]$ to prevent leaking structural information through variance. Post-competition analysis shows Hierarchical graphs are the easiest to classify, while Preferential Attachment is consistently the hardest across all solutions~\cite{olivetti2025adialab}.
+
+\subsection{Label Distribution Characteristics}
+
+The eight classes are not uniformly distributed in the training set. Classes such as Independent, Cause of X, and Consequence of Y tend to be more frequent, while Mediator and Collider have significantly fewer samples. This imbalance directly motivates the use of inverse-frequency class weights in the loss function (~\ref{sec:loss}) and Balanced Accuracy as the evaluation metric.
+
+% =====================================================================
+\section{Experimental Environment}
+\label{sec:environment}
+% =====================================================================
+
+\subsection{Hardware}
+
+All experiments are conducted on a server with the following configuration: two NVIDIA RTX 5880 GPUs (48GB combined VRAM), a 48-core CPU for parallelizing edge tensor preprocessing, and 251 GB RAM to hold the full preprocessed training set in memory. Early experiments (v2 through v8b base) run on a single A100 40GB GPU; experiments on the XY augmentation set ($\sim\!263$K samples) run on two RTX 5880 GPUs using DDP (Distributed Data Parallel) as the dataset size exceeds single-GPU memory. The dual-path transformer (v4) required an A100 80GB due to OOM on the 40GB configuration with $p=10$ graphs. Edge tensor preprocessing is parallelized across CPU cores via \texttt{ProcessPoolExecutor}; model training runs on GPU.
+
+\subsection{Software and Libraries}
+
+The programming environment uses Python with the following key libraries: PyTorch and PyTorch Lightning for model construction and training, NumPy and SciPy for preprocessing and statistical computation (including kernel regression and ANM residuals), NetworkX for graph operations during label derivation and augmentation, and the CrunchDAO client library for data access and submission. Key experiment files are: \texttt{v8b\_anm.py} (v8b base), \texttt{v8b\_anm\_xyaug.py} (v8b+XY aug), \texttt{v11\_structbias.py} (v11 base), \texttt{v11\_xyaug.py} (v11+XY aug), \texttt{v13\_fullstack.py} (ML pipeline); the local evaluation script is \texttt{evaluate.py}.
+
+% =====================================================================
+\section{Evaluation Procedure}
+\label{sec:evaluation}
+% =====================================================================
+
+\subsection{Local Evaluation}
+\label{subsec:local_eval}
+
+To rapidly evaluate architectural changes and hyperparameters without submitting to CrunchDAO, the thesis builds a local evaluation pipeline based on a local test set ($y\_\text{test\_reduced}$) stored as a pickle file. The script \texttt{evaluate.py} computes Balanced Accuracy according to Equation~\eqref{eq:balanced_acc} on this set, allowing quick comparison across experimental runs.
+
+Balanced Accuracy is computed as:
+\begin{equation}
+    \mathrm{BA}_{\mathrm{local}} = \frac{1}{C}\sum_{c=1}^{C}
+    \frac{\sum_{i} \mathbb{1}[\hat{y}_i = c \wedge y_i = c]}
+         {\sum_{i} \mathbb{1}[y_i = c]},
+    \label{eq:local_ba}
+\end{equation}
+i.e., the mean recall across all $C = 8$ classes. Balanced Accuracy is not affected by class imbalance: a class with 100 samples and one with 1000 samples contribute equally to the score.
+
+The local evaluation pipeline serves as the primary development loop: change $\to$ train $\to$ evaluate local $\to$ decide whether to submit. Only configurations that show significant local score improvement over the baseline are submitted to CrunchDAO.
+
+\subsection{CrunchDAO Public Leaderboard Evaluation}
+\label{subsec:crunchdao_submit}
+
+The CrunchDAO platform~\cite{crunchdao_competition} provides a sandboxed model execution environment: users submit a Python notebook (not a predictions file), and the system automatically runs the notebook on the hidden test set to compute Balanced Accuracy. To be compatible with the sandbox, the notebook uses the special pragma \texttt{\# @crunch/keep:on} to mark cells that retain global variables (including model weights and preprocessed data) between execution steps, avoiding recomputation from scratch and staying within the runtime limit. Additionally, an \texttt{IS\_CLOUD\_SUBMIT} flag is used to disable disk caching (setting \texttt{cache\_dir=None}) during inference, since the cloud sandbox has no persistent storage between runs.
+
+In experiments, there is a small gap between local and public scores due to slightly different test set distributions: the baseline achieves \textbf{73.96\%} local but \textbf{73.61\%} public. This indicates that local evaluation is a good but imperfect proxy, and one must be careful not to overfit to local scores.
+
+% =====================================================================
+\section{Experimental Setup}
+\label{sec:exp_setup}
+% =====================================================================
+
+\subsection{Baseline Configuration}
+
+The baseline is defined as the reimplementation of the first-place solution~\cite{adia_rank1_report} with the best hyperparameter configuration found through search:
+
+\begin{table}[h]
+\centering
+\caption{Hyperparameter configuration of the baseline model.}
+\label{tab:baseline_config}
+\begin{tabular}{lc}
+\hline
+\textbf{Hyperparameter} & \textbf{Value} \\
+\hline
+Batch size                    & 16        \\
+Learning rate (initial)       & $10^{-3}$ \\
+Number of training epochs     & 20        \\
+Training set size             & 23,500    \\
+$N_\mathrm{kernel}$           & 1,000     \\
+Hidden channels (Conv1D)      & 64        \\
+Number of residual blocks     & 5         \\
+Number of self-attention layers & 2       \\
+Optimizer                     & AdamW     \\
+Learning rate schedule        & Cosine annealing \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Experiment List}
+
+Experiments are designed following the \textit{ablation} principle: each experiment changes one component or one related group of components relative to the baseline, holding all others constant. This allows clear attribution of score changes to specific improvements.
+
+Table~\ref{tab:experiments} lists all 16 experiments conducted:
+
+\begin{table}[h]
+\centering
+\caption{List of all experiments and their changes relative to the baseline.}
+\label{tab:experiments}
+\begin{tabular}{llp{7.0cm}}
+\hline
+\textbf{Ver.} & \textbf{Name} & \textbf{Change vs baseline v2} \\
+\hline
+v2   & Baseline reimplementation    & 3ch: sorted\_u, sorted\_v, kernel coeff ($h{=}0.5$) \\
+v3   & Broadcast channels           & Broadcast partial\_corr and resid\_asym as channels 4--5 \\
+v3+  & Obs cross-attention          & v3 + cross-attention over 1000 raw observations \\
+v4   & Dual-path transformer        & Two parallel branches (edge conv + obs attention), bidirectional \\
+v5   & StatProjector MLP            & Partial corr + resid asym via separate MLP, injected at merge \\
+v5m  & Multi-bw kernel              & 5ch: 2 sorted + kernel at $h \in \{0.2, 0.5, 1.0\}$ \\
+v5a  & v5m + XY aug                 & v5m trained on ${\sim}263$K XY remap samples \\
+v6   & Structure-conditioned        & 2-stage: predict structure, then structure-conditioned attention \\
+v8b  & 8ch ANM                      & 5ch kernel multi-bw + 3ch ANM residual multi-bw \\
+v8b+ & v8b + XY aug                 & v8b trained on ${\sim}263$K XY remap samples \\
+v9   & Node-centric                 & Node-centric computation instead of edge-centric \\
+v9d  & Dual-stream node             & v9 + second stream from edge context \\
+v10  & LightGBM tabular             & Manual statistical features, gradient boosting classifier \\
+v11  & Structural bias              & v8b + topology-aware attention bias \\
+v11+ & v11 + XY aug                 & v11 trained on ${\sim}263$K XY remap samples \\
+v13  & ML fullstack                 & 300+ statistical features + PC/LiNGAM/NOTEARS/GES + XGBoost/LGBM/CatBoost stacking + GNN refinement \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Per-Class Evaluation Metrics}
+
+In addition to overall Balanced Accuracy, the thesis tracks \textit{per-class recall} (sensitivity per class):
+\begin{equation}
+    \mathrm{Recall}_c = \frac{\mathrm{TP}_c}{\mathrm{TP}_c + \mathrm{FN}_c},
+\end{equation}
+with particular attention to the two weakest classes in the baseline: Mediator (${\sim}56\%$) and Collider (${\sim}63\%$). Full $8 \times 8$ confusion matrices are also analyzed to understand the most common misclassification patterns.
+
+% =====================================================================
+\section{Experimental Results}
+\label{sec:results}
+% =====================================================================
+
+\subsection{Baseline Results}
+
+Table~\ref{tab:baseline_results} presents the baseline results on local evaluation and the public leaderboard, including per-class recall on the local set.
+
+\begin{table}[h]
+\centering
+\caption{Baseline results: per-class recall on the local set and overall Balanced Accuracy.}
+\label{tab:baseline_results}
+\begin{tabular}{lc}
+\hline
+\textbf{Class} & \textbf{Recall (local)} \\
+\hline
+Confounder        & ${\sim}70\%$ \\
+Mediator          & ${\sim}56\%$ \\
+Collider          & ${\sim}63\%$ \\
+Independent       & ${\sim}85\%$ \\
+Cause of X        & ${\sim}74\%$ \\
+Consequence of X  & ${\sim}76\%$ \\
+Cause of Y        & ${\sim}75\%$ \\
+Consequence of Y  & ${\sim}78\%$ \\
+\hline
+\textbf{Balanced Accuracy (local)}  & \textbf{73.96\%} \\
+\textbf{Balanced Accuracy (public)} & \textbf{73.61\%}  \\
+\hline
+\end{tabular}
+\end{table}
+
+For reference, Table~\ref{tab:rank1_perclass} presents the official per-class results of the first-place solution and the supervised baseline published by the competition organizers~\cite{olivetti2025adialab}.
+
+\begin{table}[h]
+\centering
+\caption{Per-class accuracy (\%) of the first-place solution and the supervised baseline on the private test set (source:~\cite{olivetti2025adialab}).}
+\label{tab:rank1_perclass}
+\begin{tabular}{lcc}
+\hline
+\textbf{Class} & \textbf{Rank 1 (76.70\%)} & \textbf{Supervised Baseline (39.68\%)} \\
+\hline
+Confounder       & 73.19 & 18.60 \\
+Collider         & 70.17 & 43.65 \\
+Mediator         & 65.67 & 13.89 \\
+Cause of X       & 79.35 & 50.88 \\
+Cause of Y       & 81.68 & 62.51 \\
+Consequence of X & 76.53 & 26.74 \\
+Consequence of Y & 80.80 & 45.04 \\
+Independent      & 86.18 & 56.12 \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Comparative Results Across All Experiments}
+
+Table~\ref{tab:comparison} summarizes the results of all experiments on local evaluation. The $\Delta$ column shows improvement relative to baseline v2.
+
+\begin{table}[h]
+\centering
+\caption{Balanced Accuracy (local and public) across all model versions. ``--'' indicates the model was not submitted due to failing to meet the improvement threshold.}
+\label{tab:comparison}
+\begin{tabular}{llccc}
+\hline
+\textbf{Ver.} & \textbf{Name} & \textbf{BA local} & \textbf{$\Delta$} & \textbf{BA public} \\
+\hline
+v2   & Baseline (3ch)                         & 73.96\% & --          & 73.61\% \\
+\hline
+\multicolumn{5}{l}{\textit{Architecture group (negative results)}} \\
+v3   & 5ch broadcast                          & 72.46\% & $-1.50\%$   & 72.13\% \\
+v3+  & 5ch + obs cross-attention              & 72.06\% & $-1.90\%$   & 71.17\% \\
+v4   & Dual-path transformer                  & 72.77\% & $-1.19\%$   & 68.76\% \\
+v5   & StatProjector MLP                      & 73.57\% & $-0.39\%$   & 72.84\% \\
+v6   & Structure-conditioned attention        & 72.28\% & $-1.68\%$   & --      \\
+v9   & Node-centric                           & 75.43\% & $+1.47\%$   & --      \\
+v9d  & Dual-stream node                       & 75.65\% & $+1.69\%$   & --      \\
+v10  & LightGBM tabular                       & 63.11\% & $-10.85\%$  & --      \\
+v13  & ML fullstack (XGB/LGBM/Cat + GNN)      & 72.64\% & $-1.32\%$   & --      \\
+\hline
+\multicolumn{5}{l}{\textit{Feature + data group (positive results)}} \\
+v5m  & Multi-bw kernel (5ch)                  & 75.44\% & $+1.48\%$   & 74.80\% \\
+v5a  & v5m + XY aug                           & 77.91\% & $+3.95\%$   & 77.55\% \\
+v8b  & 8ch (5 kernel + 3 ANM)                 & 76.94\% & $+2.98\%$   & --      \\
+v8b+ & v8b + XY aug                           & 80.26\% & $+6.30\%$   & 80.22\% \\
+\hline
+\multicolumn{5}{l}{\textit{Architecture with topological inductive bias}} \\
+v11  & Structural attention bias              & 79.59\% & $+5.63\%$   & --      \\
+\rowcolor{codeyellow}
+v11+ & \textbf{v11 + XY aug}                  & \textbf{81.14\%} & $\mathbf{+7.18\%}$ & \textbf{80.82\%} \\
+\hline
+\multicolumn{5}{l}{\textit{Competition references}} \\
+     & First-place solution~\cite{adia_rank1_report}  & -- & -- & 76.70\% \\
+     & Third-place solution~\cite{olivetti2025adialab} & -- & -- & 74.06\% \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.75\linewidth]{figures/confusion_matrix_baseline.png}
+    \caption{$8 \times 8$ confusion matrix of the baseline model on the local test set. Rows are true labels, columns are predicted labels.}
+    \label{fig:confusion_matrix}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.8\linewidth]{figures/perclass_results.png}
+    \caption{Per-class recall of the baseline and proposed improvements.}
+    \label{fig:perclass_results}
+\end{figure}
+
+\subsection{Error Analysis}
+
+Beyond aggregate numbers, the thesis analyzes confusion matrices to understand the most common misclassification errors in the baseline. Representative examples: Mediator is frequently confused with Consequence of X (both have $X \to K$); Collider is frequently confused with Independent (both have marginal $X \perp K$); and Confounder is frequently confused with Cause of X (both have $K \to X$).
+
+With v8b + XY aug, the rate of Collider $\to$ Independent misclassification drops substantially, confirming that ANM residual channels help the model detect the conditional dependence $X \not\perp K \mid Y$ characteristic of Colliders. With v11+, analysis of 139 Mediator error samples shows that ${\sim}57\%$ of errors are due to the model detecting only one half of the chain $X \to K \to Y$, suggesting that X/Y-aware chain bias could further improve Mediator classification.
+
+\subsection{Architectural Experiment Analysis (Negative Results)}
+
+All pure architectural modifications (v3, v3+, v4, v5, v6) yield results at or below the baseline. The cross-attention branch (v3+) drops $1.90\%$; the dual-path transformer (v4) drops $1.19\%$ locally but drops $4.01\%$ publicly due to severe overfitting. These results are consistent with the observation in~\cite{olivetti2025adialab} that \textit{feature engineering and representation learning} are the keys -- not increased architectural complexity. The v13 ML fullstack experiment confirms this further: despite using 300+ engineered features, four causal discovery algorithms, three gradient boosting models, a GNN refinement stage, and a stacking ensemble, it achieves only 72.64\% -- significantly below the simple Conv1D baseline. This confirms that the Conv1D architecture's ability to learn from nonlinear functional curves (the sorted+kernel channels) cannot be matched by scalar feature aggregation, regardless of the sophistication of the feature engineering pipeline.
+
+However, v11 (structural attention bias) is an important exception: the only architectural change yielding a significant positive result ($+5.63\%$ local over v2, $+2.65\%$ over v8b with the same input channels). The key distinction from v3+/v4 is that v11 adds \textit{topologically-motivated causal inductive bias} rather than raw capacity, with minimal additional parameters. Chapter~\ref{chap:results} analyzes the mechanism and significance of this distinction in detail.
+
+% =====================================================================
+\section*{Chapter 4 Summary}
+\addcontentsline{toc}{section}{Chapter 4 Summary}
+% =====================================================================
+
+This chapter described the complete experimental setup: 23,500 dataset instances with labels derived from adjacency matrices, a two-GPU server environment with 48 CPU cores, a two-tier evaluation procedure (local + CrunchDAO public leaderboard), and a list of 16 experiments designed on ablation principles. The overall results (Table~\ref{tab:comparison}) show a clear partitioning: pure architectural modifications fail, feature and data improvements succeed consistently, v13 ML fullstack confirms the superiority of DL over manual feature engineering, and v11 represents an important special case of architecture-with-inductive-bias. The best model, v11 + XY augmentation, achieves $\mathbf{81.14\%}$ local / $\mathbf{80.82\%}$ public. Detailed analysis of the reasons behind each result is presented in Chapter~\ref{chap:results}.

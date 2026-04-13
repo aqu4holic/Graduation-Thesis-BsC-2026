@@ -1,0 +1,109 @@
+\section{Đánh giá kết quả phân loại mã độc trên tập dữ liệu cung cấp bởi Microsoft}
+Năm 2015, Microsoft đã tổ chức cuộc thi tại trang Kaggle\footnote{https://www.kaggle.com/c/malware-classification} với mục tiêu phân loại phần mềm độc hại thuộc các họ tương ứng. Microsoft đã cung cấp bộ dữ liệu gồm 10868 tệp mã độc phân loại vào 9 nhóm là (1) Ramnit, (2) Lollipop, (3) Kelihos\_ver3, (4) Vundo, (5) Simda, (6) Tracur, (7) Kelihos\_ver1, (8) Obfucator.ACY, (9) Gatak. Dữ liệu phân bố thể hiện trong hình \ref{fig:distribution}. Dưới đây là ảnh màu đường cong hibert của 9 họ mã độc được trích xuất từ tập dữ liệu Microsoft.
+
+\begin{figure}[H]
+  \begin{center}
+  \includegraphics[width=400pt]{figures/c5/distribution}
+  \end{center}
+  \caption{Phân bố các họ mã độc trong dữ liệu của Microsoft}
+  \label{fig:distribution}
+\end{figure}
+\begin{enumerate}[\bfseries a)]
+  \item \textbf{Ramnit}
+
+Đây là mã độc được sử dụng để ăn cắp thông tin nhạy cảm như tài khoản và mật khẩu. Ngoài ra nó có thể cho phép truy cập máy tính bất hợp phát từ xa.
+\begin{figure}[H]
+  \begin{center}
+  \includegraphics[width=400pt]{figures/c5/ramnit}
+  \end{center}
+  \caption{Ảnh mẫu mã độc họ Ramnit}
+  \label{fig:ramnit}
+\end{figure}
+
+  \item \textbf{Lollipop}
+
+Mã độc này có chức năng hiển thị quảng cáo trong trình duyệt hoặc chuyển hướng kết quả tìm kiếm. Nó còn có thể theo dõi hành vi dùng web cũng như cho phép tải xuống hoặc cài đặt phần mềm từ xa.
+\begin{figure}[H]
+  \begin{center}
+  \includegraphics[width=400pt]{figures/c5/lollipop}
+  \end{center}
+  \caption{Ảnh mẫu mã độc họ Lollipop}
+  \label{fig:lollipop}
+\end{figure}
+
+  \item \textbf{Kelihos\_ver3}
+
+Mã độc loại thứ ba chủ yểu tham gia vào việc spam và trộm các khóa bí mật của tiền điện tử như Bitcoin. Phần mềm độc hại này thuộc loại Trojan, nó có thể truy cập và kiểm soát máy tính cũng như gửi email spam tự động.
+\begin{figure}[H]
+  \begin{center}
+  \includegraphics[width=400pt]{figures/c5/kelihosv3}
+  \end{center}
+  \caption{Ảnh mẫu mã độc họ Kelihos V3}
+  \label{fig:kelihos}
+\end{figure}
+
+  \item \textbf{Vundo}
+
+Trojan này gây ra việc tạo popup và quảng cáo trái phép. Nó cũng có thể kích hoạt tấn công mạng từ xa
+\begin{figure}[H]
+  \begin{center}
+  \includegraphics[width=400pt]{figures/c5/vundo}
+  \end{center}
+  \caption{Ảnh mẫu mã độc họ Vundo}
+  \label{fig:vundo}
+\end{figure}
+  \item \textbf{Simda}
+
+Đây là mã độc thuộc nhóm backdoor, nó sẽ ăn cắp thông tin nhạy cảm, ghi lại hoạt động gõ bàn phím, sửa đổi thông tin trong HTML.
+\begin{figure}[H]
+  \begin{center}
+  \includegraphics[width=400pt]{figures/c5/simda}
+  \end{center}
+  \caption{Ảnh mẫu mã độc họ Simda}
+  \label{fig:simda}
+\end{figure}
+
+  \item \textbf{Tracur}
+
+Loại Trojan này sẽ chuyển địa chỉ khi vào các website như google.com, youtube.com, yahoo.com sang các trang độc hại khác.
+\begin{figure}[H]
+  \begin{center}
+  \includegraphics[width=400pt]{figures/c5/tracur}
+  \end{center}
+  \caption{Ảnh mẫu mã độc họ Tracur}
+  \label{fig:tracur}
+\end{figure}
+  \item \textbf{Kelihos\_ver1}
+
+Loại mã độc này sẽ thực hiện tấn công mạng từ xa, và gửi thư rác với tần suất liên tục.
+\begin{figure}[H]
+  \begin{center}
+  \includegraphics[width=400pt]{figures/c5/kelihosv1}
+  \end{center}
+  \caption{Ảnh mẫu mã độc họ Kelihos V1}
+  \label{fig:kelihosv1}
+\end{figure}
+  \item \textbf{Obfuscator.ACY}
+
+Đây là loại mã độc sử dụng kĩ thuật nâng cao để làm rối mã.
+\begin{figure}[H]
+  \begin{center}
+  \includegraphics[width=400pt]{figures/c5/obfuscator}
+  \end{center}
+  \caption{Ảnh mẫu mã độc họ Obfuscator.ACY}
+  \label{fig:obfuscator}
+\end{figure}
+  \item \textbf{Gatak}
+
+Cuối cùng là loại mã độc nhóm Trojan, có chức năng thu thập thông tin ổ đĩa và bí mật gửi cho kẻ tấn công. Thông thường phần mềm độc hại này có trong phần mềm bẻ khóa.
+\begin{figure}[H]
+  \begin{center}
+  \includegraphics[width=400pt]{figures/c5/gatak}
+  \end{center}
+  \caption{Ảnh mẫu mã độc họ Gatak}
+  \label{fig:gatak}
+\end{figure}
+\end{enumerate}
+
+Mô hình đã chia tỉ lệ 20\% cho tập kiểm tra và 80\% cho tập huấn luyện. Dữ liệu được chia ngẫu nhiên theo phân bố các lớp trong cả tập kiểm tra và tập huấn luyện là giống nhau. Cấu hình máy huấn luyện: 64GB RAM, 2x CPU E5-2697 2.30GHz, GPU: NVIDIA Tesla K40.
+Huấn luyện mô hình trong 3 giờ, với 30 vòng lặp thu được kết quả độ chính xác 96.9\%, giá trị hàm loss: 0.001

@@ -1,0 +1,705 @@
+% \chapter{Phương pháp đề xuất cho bài toán suy luận nhân quả trên chuỗi thời gian}
+
+% \paragraph{Đối với các KLTN giải quyết bài toán nghiên cứu:}
+
+% \begin{itemize}
+%     \item Tiêu đề của chương thường là ``Phương pháp đề xuất/Mô hình đề xuất cho bài toán XYZ''. 
+%     \item Chương này cần trình bày được:
+%     \begin{itemize}
+%         \item Tổng quan phương pháp/Kiến trúc tổng thể
+%         \item Mô hình/thuật toán/phương pháp chi tiết
+%         \item Cần lý giải được vì sao giải quyết bài toán như vậy, phân tích ưu, nhược điểm 
+%     \end{itemize}
+% \end{itemize}
+
+% \paragraph{Đối với các KTLN xây dựng hệ thống:}
+% \begin{itemize}
+%     \item Tiêu đề của chương thường là ``Phân tích và thiết kế hệ thống XYZ''.
+%     \item Chương này cần trình bày được:
+%     \begin{itemize}
+%         \item Phân tích yêu cầu
+%         \item Kiến trúc tổng quan của hệ thống
+%         \item Thiết kế hệ thống chi tiết: Biểu đồ ca sử dụng, các biểu đồ tuần tự, biểu đồ luồng hoạt động, biểu đồ lớp cho các ca sử dụng chính
+%         \item Thiết kế CSDL
+%     \end{itemize}
+% \end{itemize}
+
+% Lưu ý:
+% \begin{itemize}
+%     \item \textbf{Không} đưa các bảng biểu/hình ảnh không liên quan vào KLTN
+%     \item Tiêu đề Bảng đặt trên bảng, tiêu đề Hình đặt dưới hình
+%     \item Toàn bộ hình ảnh, bảng biểu phải được tham chiếu và giải thích rõ ràng. \textbf{Không} chấp nhận các KLTN với các mục chỉ có hình/bảng không có giải thích/mô tả/thảo luận. 
+%     \item \textbf{Không} viết KLTN theo dạng ``gạch đầu dòng'' để đảm bảo rõ ràng và liền mạch trong việc giải thích và lập luận.
+% \end{itemize}
+
+% Em xin phép fill vào sau
+
+% \chapter{Phương pháp đề xuất cho bài toán phân loại vai trò nhân quả}
+% \label{chap:method}
+
+% Chương này trình bày toàn bộ pipeline của mô hình được xây dựng trong luận văn,
+% từ tiền xử lý dữ liệu, xây dựng đặc trưng, kiến trúc mạng nơ-ron,
+% đến chiến lược huấn luyện và các cải tiến được đề xuất.
+% Luận văn tái hiện giải pháp hạng nhất~\cite{adia_rank1_report, olivetti2025adialab}
+% như baseline, sau đó đề xuất hai cải tiến chính:
+% (1) mở rộng edge tensor từ 3 lên \textbf{8 kênh} bằng cách thêm hồi quy kernel đa băng thông
+% và phần dư ANM đa băng thông;
+% (2) tăng cường dữ liệu bằng kỹ thuật \textbf{X/Y remap augmentation} ($\sim\!11.2\times$ mẫu).
+
+% % =====================================================================
+% \section{Tổng quan kiến trúc}
+% \label{sec:overview}
+% % =====================================================================
+
+% Với đầu vào là một dataset gồm $n = 1000$ quan sát trên $p$ biến
+% (trong đó $X$, $Y$ được xác định sẵn), pipeline gồm bốn giai đoạn chính.
+
+% Giai đoạn đầu tiên là \textbf{xây dựng edge tensor}: với mỗi cặp biến có thứ tự $(u, v)$
+% trong đồ thị đầy đủ trên $p$ nút, ta xây dựng một tensor 3 kênh độ dài $n$
+% mã hóa quan hệ thống kê giữa $u$ và $v$.
+% Giai đoạn thứ hai là \textbf{trích xuất đặc trưng theo cạnh}:
+% mỗi edge tensor được xử lý độc lập qua một Stem Conv1D
+% và 5 khối Conv1D Residual, sau đó được gộp về vector $d$-chiều
+% qua Global Average Pooling.
+% Giai đoạn thứ ba là \textbf{tổng hợp thông tin toàn đồ thị}:
+% các vector biểu diễn cạnh được kết hợp với edge-type embedding
+% rồi đưa qua 2 lớp Multi-head Self-Attention,
+% cho phép mô hình so sánh thông tin giữa các cặp biến
+% và học biểu diễn node-level từ thông tin edge-level.
+% Giai đoạn cuối là \textbf{phân loại} qua hai đầu ra song song --
+% \textit{node head} (8 lớp, đầu ra chính)
+% và \textit{edge head} (nhị phân, chỉ dùng khi huấn luyện).
+
+% Mô hình có tổng cộng $\sim\!188$K tham số,
+% không sử dụng pretrained weights, và được huấn luyện hoàn toàn
+% từ đầu trên tập dữ liệu ADIA Lab.
+
+% \begin{figure}[h]
+%     \centering
+%     \includegraphics[width=\linewidth]{figures/top1_architecture.png}
+%     \caption{Kiến trúc tổng thể của mô hình: từ edge tensor 3 kênh qua Stem Conv1D,
+%              5 khối Residual, Global Average Pooling, Merge với edge-type embedding,
+%              2 lớp Self-Attention, đến dual-head output (node head 8-class và edge head binary).}
+%     \label{fig:top1_architecture}
+% \end{figure}
+
+% % =====================================================================
+% \section{Tiền xử lý và xây dựng edge tensor}
+% \label{sec:preprocessing}
+% % =====================================================================
+
+% \subsection{Chuẩn hóa dữ liệu}
+
+% Mỗi dataset đầu vào là một ma trận $\mathbf{D} \in \mathbb{R}^{n \times p}$
+% với $n = 1000$ quan sát và $p \in \{3,\ldots,10\}$ biến.
+% Trước khi xây dựng edge tensor, mỗi cột (biến) được chuẩn hóa
+% về phân phối chuẩn $\mathcal{N}(0,1)$ bằng z-score normalization:
+% \begin{equation}
+%     \tilde{x}_i = \frac{x_i - \mu}{\sigma + \varepsilon},
+% \end{equation}
+% với $\mu$, $\sigma$ là trung bình và độ lệch chuẩn của cột tương ứng,
+% và $\varepsilon = 10^{-8}$ để tránh chia cho 0.
+% Chuẩn hóa giúp mô hình ổn định hơn và giảm ảnh hưởng của thang đo biến gốc.
+
+% \subsection{Xây dựng đồ thị đầy đủ và các cặp cạnh}
+
+% Từ $p$ biến, ta xây dựng đồ thị đầy đủ có hướng với $p(p-1)$ cạnh
+% (mỗi cặp $(u, v)$ với $u \neq v$ cho ra hai cạnh theo hai hướng).
+% Việc xét tất cả các cặp có thứ tự -- thay vì chỉ các cặp không thứ tự --
+% là cần thiết vì kênh thứ ba (hồi quy kernel) bất đối xứng theo chiều:
+% $\hat{m}_{u \to v}(u_i) \neq \hat{m}_{v \to u}(v_i)$ nói chung,
+% và chính sự bất đối xứng này mang tín hiệu về chiều nhân quả.
+
+% \subsection{Kênh 1--2: Biến sắp xếp}
+
+% Gọi $\sigma$ là hoán vị sao cho $u_{\sigma(1)} \leq \cdots \leq u_{\sigma(n)}$.
+% Hai kênh đầu là:
+% \begin{equation}
+%     \mathbf{c}_1 = (u_{\sigma(1)},\ldots,u_{\sigma(n)}), \qquad
+%     \mathbf{c}_2 = (v_{\sigma(1)},\ldots,v_{\sigma(n)}).
+% \end{equation}
+% $\mathbf{c}_1$ bảo toàn phân phối biên của $u$;
+% $\mathbf{c}_2$ mã hóa quan hệ đơn điệu và tương quan hạng giữa $u$ và $v$,
+% đóng vai trò như biểu diễn copula thực nghiệm của cặp $(u,v)$.
+
+% \subsection{Kênh 3--5: Hồi quy kernel đa băng thông}
+% \label{subsec:channel_kernel}
+
+% Tại mỗi điểm $u_{\sigma(i)}$, ước lượng Nadaraya--Watson~\cite{nadaraya1964, watson1964}:
+% \begin{equation}
+%     \hat{m}_h(u_{\sigma(i)}) =
+%     \frac{\displaystyle\sum_{j=1}^{n} \exp\!\left(-\frac{(u_{\sigma(i)}-u_j)^2}{2h^2}\right) v_j}
+%          {\displaystyle\sum_{j=1}^{n} \exp\!\left(-\frac{(u_{\sigma(i)}-u_j)^2}{2h^2}\right)},
+%     \label{eq:nw_ch}
+% \end{equation}
+% được tính với ba băng thông $h \in \{0.2,\, 0.5,\, 1.0\}$, cho ra ba kênh:
+% \begin{equation}
+%     \mathbf{c}_{2+k} = \bigl(\hat{m}_{h_k}(u_{\sigma(1)}),\ldots,\hat{m}_{h_k}(u_{\sigma(n)})\bigr),
+%     \quad k=1,2,3.
+% \end{equation}
+% Mỗi băng thông nắm bắt mức độ trơn khác nhau:
+% $h=0.2$ nhạy với cấu trúc cục bộ, $h=1.0$ phản ánh xu hướng toàn cục.
+% Sử dụng nhiều băng thông giúp mô hình không phụ thuộc vào một lựa chọn $h$ cố định
+% và tăng tính bao quát của đặc trưng.
+
+% \subsection{Kênh 6--8: Phần dư ANM đa băng thông}
+% \label{subsec:channel_anm}
+
+% Phần dư hồi quy theo hướng $u \to v$ tại điểm $u_{\sigma(i)}$:
+% \begin{equation}
+%     r_h(u_{\sigma(i)}) = v_{\sigma(i)} - \hat{m}_h(u_{\sigma(i)}),
+%     \label{eq:anm_resid}
+% \end{equation}
+% tạo ra ba kênh $\mathbf{c}_6, \mathbf{c}_7, \mathbf{c}_8$ với $h \in \{0.2,\, 0.5,\, 1.0\}$.
+
+% Theo mô hình ANM~\cite{shimizu2006lingam}, nếu $U \to V$ là chiều nhân quả thật
+% thì phần dư $V - \hat{m}(U)$ gần độc lập với $U$, trong khi chiều ngược lại
+% $U - \hat{m}(V)$ sẽ có phụ thuộc phi tuyến rõ ràng hơn.
+% Đây là tín hiệu bất đối xứng mạnh để phân biệt chiều cạnh.
+% Thực nghiệm cho thấy việc thêm 3 kênh ANM cải thiện Collider lên $+6.1\%$
+% và Consequence of X lên $+5.0\%$ so với chỉ dùng 3 kênh gốc.
+
+% \begin{figure}[h]
+%     \centering
+%     \includegraphics[width=0.85\linewidth]{figures/edge_tensor_channels.png}
+%     \caption{Minh họa xây dựng edge tensor 8 kênh cho cặp biến $(u, v)$:
+%              kênh 1--2 là sắp xếp theo rank, kênh 3--5 là hồi quy kernel Nadaraya--Watson
+%              với băng thông $h \in \{0.2, 0.5, 1.0\}$, kênh 6--8 là phần dư ANM
+%              với cùng ba băng thông.}
+%     \label{fig:edge_tensor}
+% \end{figure}
+
+% \subsection{Triển khai song song}
+
+% Với 23,500 dataset trong tập huấn luyện và $p(p-1)$ cạnh mỗi dataset,
+% việc xây dựng edge tensor (đặc biệt kênh 3 với $n=1000$ điểm)
+% đòi hỏi tính toán đáng kể nếu xử lý tuần tự.
+% Luận văn sử dụng \texttt{ProcessPoolExecutor} với \texttt{fork} start method
+% để song song hóa tiền xử lý trên nhiều CPU core.
+% Trong DataLoader, \texttt{num\_workers=0} được dùng
+% để tránh xung đột bộ nhớ shared memory với multiprocessing đã thực hiện
+% ở bước tiền xử lý trước.
+
+% % =====================================================================
+% \section{Kiến trúc mô hình}
+% \label{sec:architecture}
+% % =====================================================================
+
+% \subsection{Stem layer}
+
+% Đầu vào của mạng là edge tensor $\mathbf{T} \in \mathbb{R}^{8 \times n}$
+% (8 kênh, độ dài chuỗi $n = 1000$).
+% Stem layer là một lớp Conv1D đơn chuyển từ 8 kênh đầu vào lên 64 kênh ẩn:
+% \begin{equation}
+%     \mathbf{H}_0 = \mathrm{Conv1D}_{8 \to 64}(\mathbf{T}) \in \mathbb{R}^{64 \times n}.
+% \end{equation}
+
+% \subsection{Năm khối Conv1D Residual}
+
+% Năm khối residual xử lý $\mathbf{H}_0$ và trích xuất các đặc trưng cục bộ
+% ngày càng trừu tượng theo chiều sâu mạng.
+% Mỗi khối có cấu trúc:
+% \begin{equation}
+%     \mathbf{H}_{l+1} = \mathbf{H}_l +
+%     \mathrm{Conv1D}\!\left(\mathrm{GELU}\!\left(\mathrm{GroupNorm}(\mathbf{H}_l)\right)\right),
+%     \quad l = 0,1,\ldots,4,
+% \end{equation}
+% với kết nối tắt (skip connection) giúp gradient lan ngược ổn định~\cite{he2016resnet}.
+% Group Normalization~\cite{wu2018groupnorm} được dùng thay cho Batch Normalization
+% vì ổn định hơn với batch size nhỏ ($\mathrm{bs} = 16$) -- trong khi Batch Norm
+% cần batch lớn để ước lượng tốt running statistics.
+% Hàm kích hoạt GELU~\cite{hendrycks2016gelu} cho gradient mịn hơn ReLU ở vùng lân cận 0,
+% phù hợp với chuỗi đặc trưng có giá trị âm (sau z-score normalization).
+% Sau 5 khối, ta có $\mathbf{H}_5 \in \mathbb{R}^{64 \times n}$.
+
+% \begin{figure}[h]
+%     \centering
+%     \includegraphics[width=0.5\linewidth]{figures/residual_block.png}
+%     \caption{Cấu trúc một khối Conv1D Residual:
+%              GroupNorm $\to$ GELU $\to$ Conv1D với kết nối tắt cộng trực tiếp đầu vào.}
+%     \label{fig:residual_block}
+% \end{figure}
+
+% \subsection{Global Average Pooling và toán tử hợp nhất (Merge)}
+% \label{subsec:merge}
+
+% Global Average Pooling gộp chiều chuỗi về một vector cố định:
+% \begin{equation}
+%     \mathbf{e}_{uv} = \frac{1}{n}\sum_{t=1}^{n} \mathbf{H}_5[\,:,\,t] \in \mathbb{R}^{64}.
+% \end{equation}
+
+% Tuy nhiên, vector $\mathbf{e}_{uv}$ lúc này chỉ mang thông tin về
+% \textit{nội dung} quan hệ thống kê giữa $u$ và $v$,
+% mà chưa mang thông tin về \textit{vị trí ngữ nghĩa} của cạnh trong đồ thị --
+% tức là cạnh này nối giữa loại nút nào với loại nút nào.
+% Ví dụ, cạnh $X \to K$ (treatment sang biến trung gian) mang ý nghĩa rất khác
+% so với cạnh $K \to Y$ (biến trung gian sang outcome) hay $K_i \to K_j$ (giữa hai biến trung gian),
+% dù ba cạnh này có thể có cùng phân phối thống kê.
+
+% Để bổ sung thông tin này, mỗi cạnh $(u, v)$ được gán một
+% \textbf{edge type} $\tau_{uv} \in \{0, 1, \ldots, T-1\}$
+% dựa trên danh tính của hai đầu nút ($X$, $Y$, hay biến $K$).
+% Một bảng tra cứu (lookup table) học được ánh xạ mỗi loại cạnh sang
+% một vector embedding $\mathbf{t}_{\tau_{uv}} \in \mathbb{R}^{64}$.
+
+% \textbf{Toán tử hợp nhất (Merge)} cộng trực tiếp hai vector:
+% \begin{equation}
+%     \tilde{\mathbf{e}}_{uv} = \mathbf{e}_{uv} + \mathbf{t}_{\tau_{uv}},
+%     \label{eq:merge}
+% \end{equation}
+% tạo ra biểu diễn cạnh $\tilde{\mathbf{e}}_{uv} \in \mathbb{R}^{64}$
+% tích hợp cả thông tin thống kê (từ Conv1D) lẫn thông tin vị trí ngữ nghĩa (từ edge-type embedding).
+% Phép cộng (thay vì nối -- concatenation) giữ nguyên chiều biểu diễn
+% và cho phép mô hình học cách kết hợp hai nguồn thông tin một cách linh hoạt.
+% Tập hợp $\{\tilde{\mathbf{e}}_{uv}\}_{u \neq v}$ sau đó được đưa vào các lớp self-attention.
+
+% \subsection{Hai lớp Multi-head Self-Attention}
+
+% Tập hợp tất cả biểu diễn cạnh trong một dataset tạo thành chuỗi
+% $\mathbf{E} = \{\mathbf{e}_{uv}\}_{u \neq v} \in \mathbb{R}^{p(p-1) \times d}$.
+% Hai lớp Multi-head Self-Attention~\cite{vaswani2017attention}
+% cho phép mỗi cạnh trao đổi thông tin với tất cả các cạnh khác trong dataset,
+% tổng hợp thông tin toàn cục về cấu trúc đồ thị:
+% \begin{equation}
+%     \mathbf{E}' = \mathrm{MultiHeadSelfAttention}(\mathbf{E}).
+% \end{equation}
+% Đây là thành phần quan trọng giúp mô hình đạt tính
+% \textit{bất biến với hoán vị biến} (permutation-equivariant):
+% kết quả phân loại của nút $K$ không phụ thuộc vào thứ tự đặt tên
+% các biến trong dataset, điều cần thiết khi $p$ thay đổi từ 3 đến 10.
+
+% \subsection{Dual-head output}
+
+% Từ biểu diễn thu được sau self-attention, mô hình có hai đầu ra song song.
+% \textit{Node head} là một lớp Linear chiếu về 8 logit tương ứng với 8 vai trò nhân quả;
+% đây là đầu ra chính, được dùng cả khi huấn luyện lẫn khi inference.
+% \textit{Edge head} là một lớp Linear chiếu về 2 logit (có/không cạnh nhân quả);
+% đây là auxiliary head, chỉ đóng góp vào hàm mất mát khi huấn luyện và bị bỏ qua khi inference.
+% Auxiliary head cung cấp tín hiệu học tập bổ sung về cấu trúc cạnh,
+% giúp ổn định quá trình huấn luyện đặc biệt ở các epoch đầu
+% khi mô hình chưa học được biểu diễn tốt cho phân loại 8 lớp.
+
+% % =====================================================================
+% \section{Hàm mất mát và xử lý mất cân bằng lớp}
+% \label{sec:loss}
+% % =====================================================================
+
+% \subsection{Cross-Entropy có trọng số nghịch đảo tần suất}
+
+% Tám lớp trong bài toán không phân bố đều -- một số lớp như Mediator và Collider
+% có số mẫu ít hơn đáng kể so với Independent hay Confounder.
+% Nếu dùng Cross-Entropy thông thường, mô hình có xu hướng thiên về các lớp đa số,
+% dẫn đến Balanced Accuracy thấp dù overall accuracy có thể cao.
+
+% Để xử lý vấn đề này, mỗi lớp $c$ được gán trọng số tỉ lệ nghịch với tần suất:
+% \begin{equation}
+%     w_c = \frac{1}{f_c \cdot C},
+%     \label{eq:class_weight}
+% \end{equation}
+% trong đó $f_c$ là tỉ lệ mẫu của lớp $c$ trong tập huấn luyện và $C = 8$.
+% Hàm mất mát node head trở thành:
+% \begin{equation}
+%     \mathcal{L}_{\mathrm{node}} = -\sum_{c=1}^{C} w_c \cdot \mathbb{1}[y = c]\, \log \hat{p}_c.
+%     \label{eq:weighted_ce}
+% \end{equation}
+
+% \subsection{Hàm mất mát tổng hợp}
+
+% Hàm mất mát cuối cùng kết hợp cả hai đầu ra:
+% \begin{equation}
+%     \mathcal{L} = \mathcal{L}_{\mathrm{node}} + \lambda \cdot \mathcal{L}_{\mathrm{edge}},
+%     \label{eq:total_loss}
+% \end{equation}
+% trong đó $\mathcal{L}_{\mathrm{edge}}$ là Binary Cross-Entropy có trọng số tương tự
+% và $\lambda$ là siêu tham số cân bằng hai tổn thất.
+
+% % =====================================================================
+% \section{Chiến lược huấn luyện}
+% \label{sec:training_strategy}
+% % =====================================================================
+
+% \subsection{Cấu hình siêu tham số}
+
+% Cấu hình cho kết quả tốt nhất trên mô hình v8b + XY augmentation:
+% batch size $= 64$, learning rate $\alpha_{\max} = 10^{-3}$, số epoch $= 10$,
+% huấn luyện trên tập tăng cường $\sim\!263$K mẫu (6 shard $\times$ 50K).
+% Batch size $= 64$ phù hợp với tập huấn luyện lớn hơn sau augmentation.
+
+% \subsection{AdamW và Cosine Annealing}
+
+% Mô hình được tối ưu bằng \textit{AdamW}~\cite{loshchilov2019adamw},
+% biến thể của Adam tách biệt weight decay khỏi gradient update,
+% giúp regularization hiệu quả hơn và tránh overfitting trên tập dữ liệu lớn.
+% Learning rate được điều chỉnh theo \textit{cosine annealing schedule}~\cite{loshchilov2017sgdr}:
+% \begin{equation}
+%     \alpha_t = \alpha_{\min} + \frac{1}{2}(\alpha_{\max} - \alpha_{\min})
+%     \left(1 + \cos\!\left(\frac{t}{T_{\max}}\pi\right)\right),
+%     \label{eq:cosine_lr}
+% \end{equation}
+% trong đó $T_{\max}$ là tổng số bước huấn luyện.
+% Cosine annealing giảm learning rate trơn tru từ $\alpha_{\max}$ về $\alpha_{\min}$,
+% giúp mô hình hội tụ ổn định ở cuối quá trình huấn luyện
+% mà không bị kẹt tại các cực tiểu cục bộ xấu như khi dùng step decay.
+
+% % =====================================================================
+% \section{Tăng cường dữ liệu X/Y Remap}
+% \label{sec:xyaug}
+% % =====================================================================
+
+% \subsection{Động cơ}
+
+% Với 23,500 dataset huấn luyện, mỗi dataset chỉ có một cặp $(X, Y)$ xác định.
+% Tuy nhiên, trong DAG thật, mỗi cạnh có hướng $A \to B$ đều có thể đóng vai trò
+% là một cặp treatment--outcome hợp lệ nếu ta đặt lại $X' = A$, $Y' = B$.
+% Điều này cho phép tạo ra nhiều bài toán phân loại mới từ cùng một DAG
+% mà không cần thêm dữ liệu quan sát mới.
+
+% \subsection{Quy trình tăng cường}
+
+% Với mỗi dataset gốc có DAG $G$ và cặp $(X, Y)$:
+% \begin{enumerate}
+%     \item Liệt kê tất cả cạnh có hướng $A \to B$ trong $G$ (không kể $X \to Y$).
+%     \item Với mỗi cặp $(A, B)$: đặt $X' = A$, $Y' = B$, và dẫn xuất lại nhãn 8 lớp
+%           cho tất cả biến $K \neq A, K \neq B$ theo bảng quy tắc ~\ref{subsec:label_derivation}.
+%     \item Giữ nguyên ma trận quan sát $\mathbf{D}$ -- chỉ thay đổi vai trò ngữ nghĩa của $X'$, $Y'$.
+% \end{enumerate}
+
+% Số dataset tăng thêm trung bình $\sim\!11.2\times$ so với tập gốc
+% (vì mỗi DAG có trung bình $\sim\!10$ cạnh ngoài cạnh $X \to Y$).
+% Từ 23,500 dataset gốc, ta thu được $\sim\!263$K mẫu huấn luyện.
+
+% \subsection{Triển khai hiệu quả}
+
+% Điểm mấu chốt là kernel regression (kênh 3--8) được tính \textit{một lần duy nhất}
+% trên toàn bộ ma trận quan sát $\mathbf{D}$ trước khi tạo các mẫu tăng cường.
+% Với mỗi cặp $(X', Y')$ mới, chỉ cần tra cứu lại nhãn từ $\mathbf{A}$
+% mà không tính lại kernel -- do đó chi phí tăng cường là tối thiểu.
+
+% Tập tăng cường được lưu dưới dạng \textit{shard}: 6 file mỗi file $\sim\!50$K mẫu,
+% tránh OOM khi tải toàn bộ vào RAM.
+% Trong quá trình huấn luyện, \texttt{ShardGroupedSampler} đảm bảo
+% các mẫu trong cùng một shard được gom vào cùng batch
+% để tối ưu việc tải đĩa.
+
+% % =====================================================================
+% \section{Các cải tiến đề xuất}
+% \label{sec:improvements}
+% % =====================================================================
+
+% Ngoài hai cải tiến chính (8 kênh và XY augmentation) đã trình bày ở trên,
+% luận văn còn thực nghiệm các hướng kiến trúc sau.
+% Kết quả cho thấy \textit{hầu hết các thay đổi kiến trúc đều không cải thiện}
+% so với việc bổ sung đặc trưng và tăng cường dữ liệu --
+% đây là một phát hiện quan trọng về bản chất của bài toán.
+
+% \subsection{Focal Loss cho các lớp khó}
+
+% Nguyên nhân của việc Mediator và Collider có accuracy thấp một phần do
+% mô hình không bị phạt đủ mạnh khi phân loại sai các mẫu khó.
+% \textit{Focal Loss}~\cite{lin2017focalloss} giải quyết điều này bằng cách
+% đặt thêm trọng số động tập trung vào các mẫu bị phân loại sai (hard examples):
+% \begin{equation}
+%     \mathcal{L}_{\mathrm{focal}} = -\sum_{c=1}^{C} w_c \cdot (1 - \hat{p}_c)^\gamma \cdot
+%     \mathbb{1}[y = c]\, \log \hat{p}_c,
+%     \label{eq:focal}
+% \end{equation}
+% với $\gamma \geq 0$ là tham số điều chỉnh mức độ tập trung.
+% Khi $\gamma = 0$, Focal Loss rút về Cross-Entropy thông thường.
+% Với các lớp khó -- nơi mô hình thường có xác suất dự đoán đúng $\hat{p}_c$ thấp --
+% nhân tử $(1 - \hat{p}_c)^\gamma$ tăng trọng số tổn thất,
+% buộc mô hình phải chú trọng học hơn trên những mẫu này
+% thay vì chỉ tập trung vào các mẫu dễ của lớp đa số.
+
+% \subsection{Bổ sung kênh đặc trưng thống kê}
+
+% Edge tensor hiện tại chỉ mã hóa thông tin của từng cặp biến $(u, v)$ một cách biệt lập.
+% Một hướng cải tiến là bổ sung thêm kênh mã hóa quan hệ \textit{có điều kiện}
+% khi kiểm soát các biến khác, cung cấp tín hiệu trực tiếp về cấu trúc d-separation.
+% Cụ thể, kênh \textit{partial correlation} giữa $u$ và $v$ khi kiểm soát
+% tất cả các biến còn lại $\{z_k\}$ là:
+% \begin{equation}
+%     \rho_{uv \cdot Z} = -\frac{\Sigma^{-1}_{uv}}{\sqrt{\Sigma^{-1}_{uu} \cdot \Sigma^{-1}_{vv}}},
+% \end{equation}
+% trong đó $\Sigma^{-1}$ là ma trận precision (nghịch đảo của ma trận hiệp phương sai).
+% Đặc trưng này phân biệt trực tiếp Confounder ($\rho_{XY \cdot K} \approx 0$)
+% với Collider ($\rho_{XY \cdot K} \neq 0$) -- hai lớp có cùng dấu hiệu
+% ở tương quan biên nhưng khác nhau khi điều kiện hóa.
+
+% \subsection{GNN refinement trên đồ thị dự đoán}
+
+% Sau khi node head tạo ra logit 8 lớp cho mỗi biến $K$,
+% các dự đoán hiện tại được đưa ra độc lập cho từng biến mà không kiểm tra
+% tính nhất quán cấu trúc giữa các biến.
+% Một lớp Graph Neural Network (GNN) nhẹ có thể được thêm vào
+% để tinh chỉnh (refine) các dự đoán dựa trên ràng buộc đồ thị:
+% ví dụ, nếu $K_1$ được dự đoán là Collider của $X \to Y$,
+% thì $K_1$ phải nhận cạnh từ cả $X$ lẫn $Y$, điều này ảnh hưởng đến
+% dự đoán edge head của các cạnh liên quan.
+% Đây là bước hậu xử lý có thể học được, thêm ràng buộc mềm về tính nhất quán
+% cấu trúc DAG mà không cần giải bài toán tối ưu tổ hợp phức tạp.
+
+\chapter{Proposed Methods for Causal Role Classification}
+\label{chap:method}
+
+This chapter describes the complete pipeline of the model developed in this thesis, from data preprocessing, feature construction, and neural network architecture, to training strategy and proposed improvements. The thesis reimplements the first-place solution~\cite{adia_rank1_report, olivetti2025adialab} as a baseline, then proposes two primary improvements: (1) extending the edge tensor from 3 to \textbf{8 channels} by adding multi-bandwidth kernel regression and multi-bandwidth ANM residual channels; and (2) data augmentation via \textbf{X/Y remap augmentation} ($\sim\!11.2\times$ training samples). A structural attention bias mechanism is additionally proposed as a topology-aware architectural improvement.
+
+% =====================================================================
+\section{Architecture Overview}
+\label{sec:overview}
+% =====================================================================
+
+Given an input dataset of $n = 1000$ observations over $p$ variables (with $X$ and $Y$ pre-identified), the pipeline consists of four main stages.
+
+The first stage is \textbf{edge tensor construction}: for each ordered variable pair $(u, v)$ in the complete directed graph over $p$ nodes, an 8-channel tensor of length $n$ is constructed encoding the statistical relationship between $u$ and $v$. The second stage is \textbf{per-edge feature extraction}: each edge tensor is processed independently through a Stem Conv1D and 5 residual Conv1D blocks, then pooled to a $d$-dimensional vector via Global Average Pooling. The third stage is \textbf{graph-wide information aggregation}: edge representation vectors are combined with edge-type embeddings and passed through 2 Multi-head Self-Attention layers, allowing the model to compare information across all variable pairs and learn node-level representations from edge-level information. The fourth stage is \textbf{classification} through two parallel output heads -- the \textit{node head} (8 classes, primary output) and the \textit{edge head} (binary, training only).
+
+The model has approximately $\sim\!188$K parameters, uses no pretrained weights, and is trained entirely from scratch on the ADIA Lab dataset.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{figures/top1_architecture.png}
+    \caption{Overall model architecture: from the 8-channel edge tensor through the Stem Conv1D, 5 residual blocks, Global Average Pooling, Merge with edge-type embedding, 2 Self-Attention layers, to the dual-head output (8-class node head and binary edge head).}
+    \label{fig:top1_architecture}
+\end{figure}
+
+% =====================================================================
+\section{Preprocessing and Edge Tensor Construction}
+\label{sec:preprocessing}
+% =====================================================================
+
+\subsection{Data Normalization}
+
+Each input dataset is a matrix $\mathbf{D} \in \mathbb{R}^{n \times p}$ with $n = 1000$ observations and $p \in \{3,\ldots,10\}$ variables. Before edge tensor construction, each column (variable) is standardized to $\mathcal{N}(0,1)$ via z-score normalization:
+\begin{equation}
+    \tilde{x}_i = \frac{x_i - \mu}{\sigma + \varepsilon},
+\end{equation}
+where $\mu$, $\sigma$ are the column mean and standard deviation, and $\varepsilon = 10^{-8}$ prevents division by zero. Normalization stabilizes the model and reduces sensitivity to the original variable scales.
+
+\subsection{Complete Directed Graph and Edge Pairs}
+
+From $p$ variables, a complete directed graph with $p(p-1)$ edges is constructed (each pair $(u, v)$ with $u \neq v$ contributes two edges in both directions). Considering all ordered pairs -- rather than unordered pairs -- is necessary because the kernel regression channel is directionally asymmetric: $\hat{m}_{u \to v}(u_i) \neq \hat{m}_{v \to u}(v_i)$ in general, and this asymmetry carries the signal about causal direction.
+
+\subsection{Channels 1--2: Sorted Variables}
+
+Let $\sigma$ be the permutation such that $u_{\sigma(1)} \leq \cdots \leq u_{\sigma(n)}$. The first two channels are:
+\begin{equation}
+    \mathbf{c}_1 = (u_{\sigma(1)},\ldots,u_{\sigma(n)}), \qquad
+    \mathbf{c}_2 = (v_{\sigma(1)},\ldots,v_{\sigma(n)}).
+\end{equation}
+$\mathbf{c}_1$ preserves the marginal distribution of $u$; $\mathbf{c}_2$ encodes the monotonic relationship and rank correlation between $u$ and $v$, serving as an empirical copula representation of the pair $(u,v)$.
+
+\subsection{Channels 3--5: Multi-Bandwidth Kernel Regression}
+\label{subsec:channel_kernel}
+
+At each point $u_{\sigma(i)}$, the Nadaraya--Watson estimate~\cite{nadaraya1964, watson1964}:
+\begin{equation}
+    \hat{m}_h(u_{\sigma(i)}) =
+    \frac{\displaystyle\sum_{j=1}^{n} \exp\!\left(-\frac{(u_{\sigma(i)}-u_j)^2}{2h^2}\right) v_j}
+         {\displaystyle\sum_{j=1}^{n} \exp\!\left(-\frac{(u_{\sigma(i)}-u_j)^2}{2h^2}\right)},
+    \label{eq:nw_ch}
+\end{equation}
+is computed with three bandwidths $h \in \{0.2,\, 0.5,\, 1.0\}$, yielding three channels:
+\begin{equation}
+    \mathbf{c}_{2+k} = \bigl(\hat{m}_{h_k}(u_{\sigma(1)}),\ldots,\hat{m}_{h_k}(u_{\sigma(n)})\bigr),
+    \quad k=1,2,3.
+\end{equation}
+Each bandwidth captures a different smoothness level: $h=0.2$ is sensitive to local structure, $h=1.0$ reflects global trends. Using multiple bandwidths prevents dependence on any single fixed $h$ and broadens the representational coverage of the features.
+
+\subsection{Channels 6--8: Multi-Bandwidth ANM Residuals}
+\label{subsec:channel_anm}
+
+The regression residual in direction $u \to v$ at point $u_{\sigma(i)}$:
+\begin{equation}
+    r_h(u_{\sigma(i)}) = v_{\sigma(i)} - \hat{m}_h(u_{\sigma(i)}),
+    \label{eq:anm_resid}
+\end{equation}
+produces three channels $\mathbf{c}_6, \mathbf{c}_7, \mathbf{c}_8$ with $h \in \{0.2,\, 0.5,\, 1.0\}$.
+
+According to the ANM framework~\cite{shimizu2006lingam}, if $U \to V$ is the true causal direction, then the residual $V - \hat{m}(U)$ is closer to being independent of $U$ than the reverse direction residual $U - \hat{m}(V)$, which will exhibit stronger nonlinear dependence. This is a powerful asymmetric signal for distinguishing edge direction. Experiments show that adding 3 ANM channels improves Collider accuracy by $+6.1\%$ and Consequence of X by $+5.0\%$ compared to using only the 3 original channels.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.85\linewidth]{figures/edge_tensor_channels.png}
+    \caption{Illustration of 8-channel edge tensor construction for variable pair $(u, v)$: channels 1--2 are rank-sorted sequences, channels 3--5 are Nadaraya--Watson kernel regression with bandwidths $h \in \{0.2, 0.5, 1.0\}$, channels 6--8 are ANM residuals with the same three bandwidths.}
+    \label{fig:edge_tensor}
+\end{figure}
+
+\subsection{Parallel Implementation}
+
+With 23,500 training datasets and $p(p-1)$ edges per dataset, constructing edge tensors (particularly channels 3--8 involving $n=1000$ points) requires substantial computation if done sequentially. The thesis uses \texttt{ProcessPoolExecutor} with the \texttt{fork} start method to parallelize preprocessing across multiple CPU cores. In the DataLoader, \texttt{num\_workers=0} is used to avoid shared memory conflicts with the preprocessing multiprocessing step. % A critical implementation detail: \texttt{OPENBLAS\_NUM\_THREADS=1} must be set before importing NumPy to prevent fork deadlocks caused by OpenBLAS's internal thread pools.
+
+% =====================================================================
+\section{Model Architecture}
+\label{sec:architecture}
+% =====================================================================
+
+\subsection{Stem Layer}
+
+The network input is an edge tensor $\mathbf{T} \in \mathbb{R}^{8 \times n}$ (8 channels, sequence length $n = 1000$). The stem layer is a single Conv1D that expands from 8 input channels to 64 hidden channels:
+\begin{equation}
+    \mathbf{H}_0 = \mathrm{Conv1D}_{8 \to 64}(\mathbf{T}) \in \mathbb{R}^{64 \times n}.
+\end{equation}
+
+\subsection{Five Residual Conv1D Blocks}
+
+Five residual blocks process $\mathbf{H}_0$ and extract increasingly abstract local features with depth. Each block has the structure:
+\begin{equation}
+    \mathbf{H}_{l+1} = \mathbf{H}_l +
+    \mathrm{Conv1D}\!\left(\mathrm{GELU}\!\left(\mathrm{GroupNorm}(\mathbf{H}_l)\right)\right),
+    \quad l = 0,1,\ldots,4,
+\end{equation}
+with skip connections ensuring stable gradient flow~\cite{he2016resnet}. Group Normalization~\cite{wu2018groupnorm} is used instead of Batch Normalization because it is more stable with small batch sizes ($\mathrm{bs} = 16$\,--\,64) -- Batch Norm requires large batches to estimate running statistics accurately. The GELU activation~\cite{hendrycks2016gelu} provides smoother gradients than ReLU near zero, which is appropriate for sequences with negative values (after z-score normalization). After 5 blocks: $\mathbf{H}_5 \in \mathbb{R}^{64 \times n}$.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.5\linewidth]{figures/residual_block.png}
+    \caption{Structure of a single residual Conv1D block: GroupNorm $\to$ GELU $\to$ Conv1D with a direct additive skip connection.}
+    \label{fig:residual_block}
+\end{figure}
+
+\subsection{Global Average Pooling and the Merge Operator}
+\label{subsec:merge}
+
+Global Average Pooling reduces the sequence dimension to a fixed-size vector:
+\begin{equation}
+    \mathbf{e}_{uv} = \frac{1}{n}\sum_{t=1}^{n} \mathbf{H}_5[\,:,\,t] \in \mathbb{R}^{64}.
+\end{equation}
+
+At this point, $\mathbf{e}_{uv}$ encodes only the \textit{content} of the statistical relationship between $u$ and $v$, but not the \textit{semantic position} of the edge in the graph -- that is, which types of nodes it connects. For example, the edge $X \to K$ (treatment to intermediate variable) carries a very different meaning from $K \to Y$ (intermediate to outcome) or $K_i \to K_j$ (between two non-special variables), even if the three edges have similar statistical distributions.
+
+To encode this information, each edge $(u, v)$ is assigned an \textbf{edge type} $\tau_{uv} \in \{0, 1, \ldots, T-1\}$ based on the identity of the two endpoint nodes ($X$, $Y$, or a variable $K$). A learnable lookup table maps each edge type to an embedding vector $\mathbf{t}_{\tau_{uv}} \in \mathbb{R}^{64}$.
+
+The \textbf{Merge operator} adds the two vectors:
+\begin{equation}
+    \tilde{\mathbf{e}}_{uv} = \mathbf{e}_{uv} + \mathbf{t}_{\tau_{uv}},
+    \label{eq:merge}
+\end{equation}
+producing an edge representation $\tilde{\mathbf{e}}_{uv} \in \mathbb{R}^{64}$ that integrates both statistical information (from Conv1D) and semantic positional information (from edge-type embedding). Addition rather than concatenation preserves the representation dimension and allows the model to learn flexible combinations of the two information sources. The set $\{\tilde{\mathbf{e}}_{uv}\}_{u \neq v}$ is then passed to the self-attention layers.
+
+\subsection{Two Multi-Head Self-Attention Layers}
+
+The set of all edge representations in a dataset forms a sequence $\mathbf{E} = \{\tilde{\mathbf{e}}_{uv}\}_{u \neq v} \in \mathbb{R}^{p(p-1) \times d}$. Two Multi-head Self-Attention layers~\cite{vaswani2017attention} allow each edge to exchange information with all other edges in the dataset, aggregating global information about the graph structure:
+\begin{equation}
+    \mathbf{E}' = \mathrm{MultiHeadSelfAttention}(\mathbf{E}).
+\end{equation}
+This component is critical for achieving \textit{permutation equivariance}: the classification result for node $K$ does not depend on the naming order of variables in the dataset, which is essential given that $p$ ranges from 3 to 10.
+
+\subsection{Dual-Head Output}
+
+From the representation obtained after self-attention, the model has two parallel output heads. The \textit{node head} is a Linear layer projecting to 8 logits corresponding to the 8 causal roles; this is the primary output, used during both training and inference. The \textit{edge head} is a Linear layer projecting to 2 logits (causal edge present or absent); this is an auxiliary head that contributes only to the training loss and is discarded during inference. The auxiliary head provides an additional learning signal about edge structure, helping to stabilize training particularly in early epochs when the model has not yet learned good representations for 8-class classification.
+
+% =====================================================================
+\section{Loss Function and Class Imbalance Handling}
+\label{sec:loss}
+% =====================================================================
+
+\subsection{Inverse-Frequency Weighted Cross-Entropy}
+
+The eight classes in this problem are not uniformly distributed -- classes such as Mediator and Collider have significantly fewer samples than Independent or Confounder. Standard Cross-Entropy would cause the model to favor majority classes, resulting in low Balanced Accuracy despite potentially high overall accuracy.
+
+To address this, each class $c$ is assigned a weight inversely proportional to its frequency:
+\begin{equation}
+    w_c = \frac{1}{f_c \cdot C},
+    \label{eq:class_weight}
+\end{equation}
+where $f_c$ is the fraction of class $c$ samples in the training set and $C = 8$. The node head loss becomes:
+\begin{equation}
+    \mathcal{L}_{\mathrm{node}} = -\sum_{c=1}^{C} w_c \cdot \mathbb{1}[y = c]\, \log \hat{p}_c.
+    \label{eq:weighted_ce}
+\end{equation}
+
+\subsection{Combined Loss}
+
+The final loss combines both output heads:
+\begin{equation}
+    \mathcal{L} = \mathcal{L}_{\mathrm{node}} + \lambda \cdot \mathcal{L}_{\mathrm{edge}},
+    \label{eq:total_loss}
+\end{equation}
+where $\mathcal{L}_{\mathrm{edge}}$ is Binary Cross-Entropy with similar inverse-frequency weighting, and $\lambda$ is the balancing hyperparameter.
+
+% =====================================================================
+\section{Training Strategy}
+\label{sec:training_strategy}
+% =====================================================================
+
+\subsection{Hyperparameter Configuration}
+
+The configuration achieving the best results on the v11 + XY augmentation model is: batch size $= 64$, learning rate $\alpha_{\max} = 10^{-3}$, number of epochs $= 10$, training on the augmented set of $\sim\!263$K samples (6 shards $\times$ 50K). For the base model (without augmentation), the configuration is: batch size $= 16$, learning rate $\alpha_{\max} = 10^{-3}$, number of epochs $= 20$--$30$, training on the full 23,500 samples.
+
+\subsection{AdamW and Cosine Annealing}
+
+The model is optimized with \textit{AdamW}~\cite{loshchilov2019adamw}, a variant of Adam that decouples weight decay from gradient updates, enabling more effective regularization and preventing overfitting on large datasets. The learning rate follows a \textit{cosine annealing schedule}~\cite{loshchilov2017sgdr}:
+\begin{equation}
+    \alpha_t = \alpha_{\min} + \frac{1}{2}(\alpha_{\max} - \alpha_{\min})
+    \left(1 + \cos\!\left(\frac{t}{T_{\max}}\pi\right)\right),
+    \label{eq:cosine_lr}
+\end{equation}
+where $T_{\max}$ is the total number of training steps. Cosine annealing decreases the learning rate smoothly from $\alpha_{\max}$ to $\alpha_{\min}$, enabling stable convergence at the end of training without getting stuck in poor local minima as with step decay schedules.
+
+\subsection{Distributed Training for Large-Scale Augmentation}
+
+Training on the $\sim\!263$K augmented dataset (stored as 6 shards of $\sim\!50$K samples each) requires Distributed Data Parallel (DDP) training across two GPUs, as the dataset size exceeds single-GPU memory. A custom \texttt{ShardGroupedSampler} ensures that samples from the same shard are batched together to minimize disk I/O. Important implementation notes for DDP: \texttt{use\_distributed\_sampler=False} when using the custom sampler, strip \texttt{module.} prefix when saving model weights, and the \texttt{LOCAL\_RANK} environment variable guards the evaluation step so only rank-0 performs evaluation.
+
+% =====================================================================
+\section{X/Y Remap Data Augmentation}
+\label{sec:xyaug}
+% =====================================================================
+
+\subsection{Motivation}
+
+With 23,500 training datasets, each dataset has only one pre-defined pair $(X, Y)$. However, in the ground-truth DAG, any directed edge $A \to B$ can serve as a valid treatment-outcome pair if we relabel $X' = A$, $Y' = B$. This allows generating many new classification problems from the same DAG without collecting additional observational data.
+
+\subsection{Augmentation Procedure}
+
+For each original dataset with DAG $G$ and pair $(X, Y)$:
+\begin{enumerate}
+    \item Enumerate all directed edges $A \to B$ in $G$ (excluding $X \to Y$).
+    \item For each pair $(A, B)$: set $X' = A$, $Y' = B$, and re-derive 8-class labels for all variables $K \neq A, K \neq B$ according to the rule table in ~\ref{subsec:label_derivation}.
+    \item Keep the observation matrix $\mathbf{D}$ unchanged -- only the semantic roles of $X'$ and $Y'$ change.
+\end{enumerate}
+
+The number of augmented datasets grows by approximately $\sim\!11.2\times$ on average compared to the original set (as each DAG has approximately 10 edges besides $X \to Y$). From 23,500 original datasets, approximately $\sim\!263$K training samples are obtained.
+
+\subsection{Efficient Implementation}
+
+The key efficiency insight is that the kernel regression (channels 3--8) is computed \textit{once} over the full observation matrix $\mathbf{D}$ before generating augmented samples. For each new pair $(X', Y')$, only label re-derivation from the adjacency matrix $\mathbf{A}$ is needed -- no recomputation of kernels. This makes augmentation computationally near-free once the base edge tensors are built.
+
+The augmented set is stored as \textit{shards}: 6 files each containing $\sim\!50$K samples, avoiding OOM when loading into RAM. During training, \texttt{ShardGroupedSampler} ensures that samples from the same shard are batched together to optimize disk loading.
+
+% =====================================================================
+\section{Structural Attention Bias}
+\label{sec:structbias}
+% =====================================================================
+
+\subsection{Motivation}
+
+Standard multi-head self-attention treats all edge pairs equally when computing attention weights, regardless of their topological relationship in the graph. However, edges that share a common endpoint -- or form a chain through $X \to K \to Y$ -- are causal structurally more relevant to each other than unrelated edges. This prior knowledge about causal topology can be injected into the attention mechanism at minimal parameter cost.
+
+\subsection{Implementation}
+
+For each pair of edges $(u_1, v_1)$ and $(u_2, v_2)$, six topological relationship types $\tau$ are defined based on shared endpoints: \textit{reverse} (same pair, opposite direction), \textit{shared-source} ($u_1 = u_2$), \textit{shared-target} ($v_1 = v_2$), \textit{forward-chain} ($v_1 = u_2$), \textit{backward-chain} ($v_2 = u_1$), and \textit{unrelated}. The attention logit is adjusted by a learned scalar bias:
+\begin{equation}
+  A_{ij} = \frac{q_i \cdot k_j + b_{\tau(i,j)}}{\sqrt{d}},
+  \label{eq:v11_bias}
+\end{equation}
+where $b_\tau \in \mathbb{R}$ is a learned bias for each type $\tau$. The bias matrix is built in the \texttt{collate\_fn} (not stored per sample) and is cached per graph size $p$ since there are only 3--10 possible values of $p$. Bias weights are initialized to zero so training starts from standard attention.
+
+This differs fundamentally from the failed architectural experiments (v3+, v4): rather than allowing attention to learn everything from raw observation data, structural bias only learns the \textit{degree of priority among topological types}, keeping the parameter space small with explicit causal prior.
+
+% =====================================================================
+\section{Additional Experiments and Negative Results}
+\label{sec:improvements}
+% =====================================================================
+
+Beyond the primary improvements described above, the thesis investigates several other architectural directions. Their results are predominantly negative, constituting important findings about the nature of this problem.
+
+\subsection{Observation-Level Cross-Attention}
+
+One direction explored is adding a branch that performs cross-attention over the raw $n=1000$ observations, rather than just pooling them. The hypothesis is that attention over observation pairs could learn conditional independence patterns without explicit feature engineering. However, this approach (v3+, v4) consistently underperforms: without strong inductive bias about which observation pairs matter causally, the attention learns noise and overfits, as evidenced by large gaps between local and public scores.
+
+\subsection{Full ML Pipeline with Gradient Boosting}
+
+The thesis also tests a purely tabular machine learning approach (v13): a 300+ feature pipeline combining correlation statistics, partial correlation, CMI, ANM scores, BIC scores, and outputs from classical causal discovery algorithms (PC, LiNGAM, NOTEARS, GES), fed into an XGBoost/LightGBM/CatBoost ensemble with an additional GNN refinement stage. Despite substantial engineering effort, this achieves only 72.64\% -- confirming that the Conv1D architecture's ability to learn from nonlinear functional curves cannot be replicated by scalar feature engineering alone.
+
+\subsection{GNN Refinement on Predicted Graph}
+
+After the node head produces 8-class logits for each variable $K$, current predictions are made independently per variable without checking structural consistency across variables. A lightweight Graph Neural Network (GNN) refinement pass could be added to adjust predictions based on graph-level constraints: for example, if $K_1$ is predicted as a Collider of $X \to Y$, it must receive edges from both $X$ and $Y$, affecting the edge head predictions of related edges. This remains a promising direction that was not fully developed within the scope of this thesis.

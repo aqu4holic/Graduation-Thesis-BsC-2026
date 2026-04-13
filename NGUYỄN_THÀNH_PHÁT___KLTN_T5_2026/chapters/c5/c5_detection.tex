@@ -1,0 +1,30 @@
+\section{Đánh giá kết quả phát hiện mã độc trên tập dữ liệu mã độc IoT}
+Tập dữ liệu mã độc thực thi trong nền tảng IoT được lấy từ phòng thí nghiệm Ogawa thuộc viện Công nghệ tiên tiến Nhật Bản (JAIST). Tập dữ liệu gồm 15623 mẫu với nhiều loại kiến trúc CPU khác nhau. Để đánh giá chính xác hiệu quả của phương pháp, dữ liệu huấn luyện lựa chọn những tệp tin có cùng kiểu kiến trúc. Thông qua việc đọc $header$ tệp tin, hệ thống thu thập $1186$ tệp tin mã độc có cùng định dạng là $elf64-x86-64$. Tập dữ liệu $goodware$ được lấy trong hệ điều hành mặc định $Ubuntu v16.10$ gồm $1161$ tệp.
+Dưới đây là ảnh màu đường cong hibert của mã độc và tệp tin thông thường.
+
+\begin{enumerate}[\bfseries a)]
+  \item \textbf{Goodware}
+
+Ảnh entropy sinh từ tệp tin trong phần mềm thông thường không chứa nhiều khối màu hồng, các khối màu đen có xu hướng liền kề và không xen lẫn màu khác.
+\begin{figure}[H]
+  \begin{center}
+  \includegraphics[width=400pt]{figures/c5/goodware}
+  \end{center}
+  \caption{Ảnh mẫu phần mềm thông thường}
+  \label{fig:malware}
+\end{figure}
+
+  \item \textbf{Malware}
+
+Ảnh entropy sinh từ tệp tin phần mềm độc hại chiếm đa số là khối màu hồng và xen lẫn khối nhỏ màu đen.
+\begin{figure}[H]
+  \begin{center}
+  \includegraphics[width=400pt]{figures/c5/malware}
+  \end{center}
+  \caption{Ảnh mẫu phần mềm độc hại IoT}
+  \label{fig:goodware}
+\end{figure}
+
+\end{enumerate}
+Mô hình đã chia tỉ lệ 20\% cho tập kiểm tra và 80\% cho tập huấn luyện. Dữ liệu được chia ngẫu nhiên theo phân bố các lớp trong cả tập kiểm tra và tập huấn luyện là giống nhau. Cấu hình máy huấn luyện: 64GB RAM, 2x CPU E5-2697 2.30GHz, GPU: NVIDIA Tesla K40.
+Huấn luyện mô hình trong 1 giờ, với 30 vòng lặp thu được kết quả độ chính xác 96.51 \%, F1 = 96.48 \%, giá trị hàm loss: 0.003

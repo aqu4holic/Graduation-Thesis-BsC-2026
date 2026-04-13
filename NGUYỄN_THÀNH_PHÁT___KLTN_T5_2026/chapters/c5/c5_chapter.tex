@@ -1,0 +1,732 @@
+% \chapter{Thực nghiệm và đánh giá kết quả}
+% Trong chương này, khóa luận sẽ báo cáo kết quả thực nghiệm mô hình trên hai tập dữ liệu là: phát hiện mã độc trong tập dữ liệu IoT và phân loại các họ mã độc trong tập dữ liệu Microsoft.
+% \input{chapters/c5/c5_detection}
+% \input{chapters/c5/c5_classification}
+% \section*{Kết luận chương 5}
+% \addcontentsline{toc}{section}{Kết luận chương 5}
+% Trong chương 5, khóa luận đã trình bày và phân tích kết quả thực nghiệm mô hình học sâu đối với bài toán phát hiện và phân loại mã độc. Tập dữ liệu thử nghiệm mô hình gồm: dữ liệu mã độc IoT và dữ liệu các họ mã độc trong hệ điều hành Microsoft.
+
+% \chapter{Kết quả thực nghiệm và phân tích}
+% \label{chap:results}
+
+% Chương này trình bày và phân tích toàn bộ kết quả thực nghiệm của 15 phiên bản mô hình
+% được phát triển trong luận văn, từ baseline tái hiện (v2) đến mô hình đề xuất tốt nhất (v11 + XY aug).
+% Kết quả được so sánh với giải pháp hạng nhất chính thức của cuộc thi~\cite{olivetti2025adialab}.
+
+% % =====================================================================
+% \section{Kết quả tổng quan theo từng phiên bản}
+% \label{sec:overall_results}
+% % =====================================================================
+
+% Bảng~\ref{tab:full_results} trình bày Balanced Accuracy (local và public) của tất cả các
+% phiên bản mô hình, sắp xếp theo tiến trình phát triển.
+
+% \begin{table}[h]
+% \centering
+% \caption{Balanced Accuracy (\%) của tất cả phiên bản mô hình trên tập local và public leaderboard.
+%          Cột $\Delta$ là độ lệch so với baseline v2 trên local.}
+% \label{tab:full_results}
+% \begin{tabular}{llccc}
+% \hline
+% \textbf{Ver.} & \textbf{Mô tả} & \textbf{Local} & \textbf{$\Delta$} & \textbf{Public} \\
+% \hline
+% v2   & Baseline tái hiện hạng nhất (3ch)          & 73.96 & --         & 73.61 \\
+% \hline
+% \multicolumn{5}{l}{\textit{Nhóm kiến trúc (negative results)}} \\
+% v3   & 5ch broadcast scalars                       & 72.46 & $-1.50$    & 72.13 \\
+% v3+  & 5ch + obs cross-attention                   & 72.06 & $-1.90$    & 71.17 \\
+% v4   & Full dual-path transformer                  & 72.77 & $-1.19$    & 68.76 \\
+% v5   & StatProjector MLP tại merge                 & 73.57 & $-0.39$    & 72.84 \\
+% v6   & Structure-conditioned attention             & 72.28 & $-1.68$    & --    \\
+% v9   & Node-centric design                         & 75.43 & $+1.47$    & --    \\
+% v9d  & Dual-stream node                            & 75.65 & $+1.69$    & --    \\
+% v10  & LightGBM (tabular baseline)                 & 63.11 & $-10.85$   & --    \\
+% \hline
+% \multicolumn{5}{l}{\textit{Nhóm đặc trưng + dữ liệu (positive results)}} \\
+% v5m  & Multi-bw kernel, 5ch                        & 75.44 & $+1.48$    & 74.80 \\
+% v5a  & v5m + XY augmentation                       & 77.91 & $+3.95$    & 77.55 \\
+% v8   & 5ch kernel + CMI/ANM (intermediate)         & 75.99 & $+2.03$    & --    \\
+% v8b  & 8ch: 5 kernel + 3 ANM                       & 76.94 & $+2.98$    & --    \\
+% v8b+ & v8b + XY augmentation                       & 80.26 & $+6.30$    & 80.22 \\
+% \hline
+% \multicolumn{5}{l}{\textit{Kiến trúc với inductive bias tô-pô}} \\
+% v11  & v8b + structural attention bias             & 79.59 & $+5.63$    & --    \\
+% \rowcolor{codeyellow}
+% v11+ & \textbf{v11 + XY augmentation}              & \textbf{81.14} & $\mathbf{+7.18}$ & \textbf{80.82} \\
+% \hline
+% \multicolumn{5}{l}{\textit{Tham chiếu}} \\
+%      & Giải pháp hạng nhất~\cite{olivetti2025adialab}  & -- & -- & 76.70 \\
+%      & Giải pháp hạng ba~\cite{olivetti2025adialab}    & -- & -- & 74.06 \\
+% \hline
+% \end{tabular}
+% \end{table}
+
+% Nhìn toàn cục, có thể chia các thí nghiệm thành ba nhóm.
+% \textit{Nhóm kiến trúc thuần túy} -- bao gồm tất cả các nỗ lực thay đổi cấu trúc mạng
+% (thêm nhánh attention, dual-path, node-centric, v.v.) -- đều cho kết quả thấp hơn
+% hoặc xấp xỉ baseline.
+% \textit{Nhóm đặc trưng và dữ liệu} -- bổ sung kênh kernel đa băng thông,
+% kênh ANM residual, và tăng cường dữ liệu X/Y remap -- đều cải thiện nhất quán.
+% Và \textit{nhóm inductive bias tô-pô} (v11/v11+) là ngoại lệ quan trọng:
+% kiến trúc có thể giúp ích khi được thiết kế với prior nhân quả rõ ràng.
+% Đây là phát hiện trung tâm của luận văn và được phân tích chi tiết trong các section sau.
+
+% % =====================================================================
+% \section{Phân tích nhóm thí nghiệm kiến trúc (Negative Results)}
+% \label{sec:arch_results}
+% % =====================================================================
+
+% \subsection{v3: Broadcast scalar features (5 kênh)}
+
+% Phiên bản v3 bổ sung partial correlation và residual asymmetry dưới dạng
+% \textit{hằng số được broadcast} thành kênh thứ 4 và 5 của edge tensor
+% (mỗi vị trí trong chuỗi độ dài $n=1000$ nhận cùng một giá trị scalar).
+% Kết quả: local giảm từ 73.96\% xuống 72.46\% ($-1.50\%$),
+% public giảm từ 73.61\% xuống 72.13\%.
+
+% Nguyên nhân rõ ràng: Conv1D học đặc trưng cục bộ trên chuỗi theo chiều không gian.
+% Một kênh hằng số không có biến thiên không gian nào để mạng học,
+% nên các kênh này chỉ là nhiễu thêm vào không gian tham số.
+% Bài học: \textit{thống kê thô không thể đưa vào như kênh broadcast -- cần có biến thiên không gian}.
+
+% \subsection{v3+: Observation cross-attention branch}
+
+% Phiên bản v3+ thêm một nhánh cross-attention trên quan sát thô $(u,v)$:
+% MLP chiếu các cặp $(u_i, v_i)$ thành token, sau đó cross-attention
+% với $Q$ từ biểu diễn conv, $KV$ từ token quan sát.
+% Kết quả là 72.06\% local / 71.17\% public -- tệ hơn cả v3.
+
+% Nhánh quan sát thêm ${\sim}100$K tham số mà không có inductive bias phù hợp:
+% attention tự do trên 1000 quan sát không biết đâu là cấu trúc nhân quả cần chú ý,
+% nên chỉ học noise và overfit.
+% Khoảng cách local--public ($0.89\%$) lớn hơn v3, xác nhận overfitting.
+
+% \subsection{v4: Full dual-path transformer}
+
+% Phiên bản v4 là kiến trúc phức tạp nhất: conv path + obs transformer
+% (2 lớp self-attention trên 1000 observation tokens + learned query pooling)
+% + bidirectional cross-attention theo cả hai chiều (conv$\to$obs và obs$\to$conv)
+% + fusion merge. Tổng ${\sim}240$K tham số.
+% Kết quả: 72.77\% local, nhưng chỉ 68.76\% public --
+% khoảng cách local--public lớn nhất trong tất cả các thí nghiệm ($-4.01\%$ so với baseline trên public),
+% cho thấy overfitting nghiêm trọng.
+% Thực nghiệm phải chạy trên A100 80GB do OOM trên A100 40GB với đồ thị $p=10$.
+
+% \subsection{v5: StatProjector MLP}
+
+% Phiên bản v5 giải quyết vấn đề của v3 theo cách đúng hơn:
+% partial correlation và residual asymmetry được đưa vào dưới dạng
+% \textit{per-edge scalar} qua MLP riêng (StatProjector: $2 \to 64 \to 64$),
+% kết quả được inject tại bước merge như đầu vào thứ 3.
+% Kết quả local 73.57\% -- gần bằng baseline nhưng vẫn thấp hơn baseline trên public (72.84\%).
+
+% StatProjector cải thiện có ý nghĩa ở các lớp khó:
+% Mediator $+2.2\%$, Collider $+2.0\%$, Confounder $+1.7\%$,
+% nhưng làm giảm các lớp dễ, net negative toàn cục.
+% Bài học: đặc trưng thống kê cần được inject \textit{sau khi} Conv1D và tổng hợp qua pooling,
+% không phải tại bước merge trước self-attention.
+
+% \subsection{v6: Structure-conditioned attention}
+
+% Phiên bản v6 có thiết kế 2-stage:
+% Stage 1 dự đoán cấu trúc cạnh (edge CLF) và lưu edge embeddings;
+% Stage 2 dùng cấu trúc dự đoán để bias attention -- các cạnh chia sẻ nút
+% attend mạnh hơn vào nhau theo ma trận kề dự đoán.
+% Kết quả: 72.28\% local, thấp hơn baseline.
+% Attention bias theo cấu trúc dự đoán bị nhiễu bởi lỗi Stage 1,
+% và việc dùng cấu trúc dự đoán để guide attention tạo ra error propagation không kiểm soát được.
+
+% \subsection{v9, v9d: Node-centric designs}
+
+% v9 và v9d thiết kế lại pipeline từ node-centric thay vì edge-centric,
+% nhưng chỉ đạt 75.43\% và 75.65\% local -- thấp hơn v8b (76.94\%)
+% dù có complexity tương đương.
+% Node-centric giảm bớt edge $O(p^2)$ context, làm mô hình không nắm bắt được
+% các phụ thuộc dài hạn giữa các cạnh trong đồ thị.
+% Kết quả này xác nhận rằng biểu diễn edge-centric của giải pháp gốc
+% là lựa chọn kiến trúc đúng cho bài toán này.
+
+% \subsection{v10: LightGBM}
+
+% Phiên bản v10 thử nghiệm hướng tiếp cận tabular ML (LightGBM)
+% với đặc trưng thống kê thủ công, chỉ đạt 63.11\% local --
+% thấp hơn baseline 10.85\%.
+% Điều này xác nhận rằng hướng học sâu end-to-end hiệu quả hơn
+% feature engineering + gradient boosting cho bài toán này,
+% dù các giải pháp hạng 3--5 trong cuộc thi đã dùng XGBoost/LightGBM hiệu quả
+% với feature engineering rất tinh vi (923--7000 đặc trưng)~\cite{olivetti2025adialab}.
+% Sự khác biệt nằm ở quy mô feature engineering: tabular ML cần đặc trưng được
+% thiết kế kỹ lưỡng ở mức độ rất cao để cạnh tranh với biểu diễn học sâu.
+
+% % =====================================================================
+% \section{Phân tích nhóm thí nghiệm đặc trưng và dữ liệu (Positive Results)}
+% \label{sec:feature_results}
+% % =====================================================================
+
+% \subsection{v5m: Multi-bandwidth kernel regression (5 kênh)}
+
+% Thay vì dùng một băng thông cố định $h = 0.5$ như v2,
+% v5m thêm hai kênh kernel với $h \in \{0.2, 1.0\}$,
+% từ đó edge tensor có 5 kênh (2 sorted + 3 multi-bw kernel).
+% Kết quả: 75.44\% local / 74.80\% public, tăng $+1.48\%$ so với baseline.
+
+% Cải thiện này có ý nghĩa: mỗi băng thông nắm bắt mức độ trơn khác nhau
+% của quan hệ phi tuyến giữa $u$ và $v$.
+% $h = 0.2$ nhạy với cấu trúc cục bộ (dốc, bước nhảy đột ngột),
+% $h = 1.0$ phản ánh xu hướng toàn cục (tuyến tính, đơn điệu).
+% Mô hình Conv1D có thể học cách kết hợp thông tin ở nhiều tỷ lệ không gian.
+
+% \begin{figure}[h]
+%     \centering
+%     \includegraphics[width=0.75\linewidth]{figures/multibw_effect.png}
+%     \caption{So sánh per-class recall của v2 baseline và v5m (multi-bw kernel).
+%              Các lớp liên quan đến nhận diện chiều nhân quả (CauseX, CauseY, ConseqX, ConseqY)
+%              được cải thiện nhiều nhất.}
+%     \label{fig:multibw_effect}
+% \end{figure}
+
+% \subsection{v5a: XY Augmentation trên kiến trúc v5m}
+
+% v5a áp dụng X/Y remap augmentation (~\ref{sec:xyaug}) trên kiến trúc v5m,
+% từ 23,500 dataset gốc tạo ra ${\sim}263$K mẫu huấn luyện.
+% Kết quả: 77.91\% local / 77.55\% public, tăng $+3.95\%$ so với baseline
+% và $+2.47\%$ so với v5m.
+
+% Đây là bước nhảy vọt đầu tiên vượt qua giải pháp hạng nhất (76.70\%) trên public leaderboard.
+% Kết quả xác nhận rằng X/Y augmentation là một kỹ thuật hiệu quả cao:
+% nó không chỉ tăng số lượng mẫu mà còn tăng \textit{đa dạng} của cách mô hình
+% nhìn nhận cùng một cấu trúc nhân quả từ nhiều góc độ $(X', Y')$ khác nhau.
+
+% \subsection{v8b: 8 kênh (5 kernel + 3 ANM)}
+
+% v8b mở rộng v5m bằng cách thêm 3 kênh phần dư ANM đa băng thông
+% $r_h(u_{\sigma(i)}) = v_{\sigma(i)} - \hat{m}_h(u_{\sigma(i)})$
+% với $h \in \{0.2, 0.5, 1.0\}$, tạo edge tensor 8 kênh.
+% Kết quả: 76.94\% local ($+2.98\%$ so với baseline).
+
+% Cải thiện tập trung vào hai lớp khó nhất:
+% Collider tăng $+6.1\%$ và Consequence of X tăng $+5.0\%$ so với v5m đơn thuần.
+% Điều này nhất quán với lý thuyết ANM: phần dư hồi quy theo chiều nhân quả đúng
+% phải gần độc lập với biến nguồn, trong khi chiều ngược lại thì không.
+% Mô hình học được dấu hiệu bất đối xứng này từ hình dạng chuỗi $\mathbf{c}_{6..8}$.
+
+% \subsection{v8b + XY Augmentation}
+
+% Kết hợp v8b với XY augmentation đạt \textbf{80.26\%} local / \textbf{80.22\%} public,
+% tăng $+6.30\%$ so với baseline và $+3.32\%$ so với v8b đơn thuần.
+% Đây là kết quả đầu tiên vượt $80\%$ và xác nhận hiệu ứng cộng hưởng giữa hai kỹ thuật:
+% ANM channels cải thiện nhận diện hướng nhân quả cục bộ,
+% trong khi XY augmentation cải thiện khả năng tổng quát hóa qua nhiều góc nhìn $(X,Y)$.
+
+% % =====================================================================
+% \section{Phân tích v11: Structural Attention Bias}
+% \label{sec:v11_analysis}
+% % =====================================================================
+
+% \subsection{Thiết kế và động lực}
+
+% v11 là ngoại lệ duy nhất trong nhóm kiến trúc: thay đổi kiến trúc duy nhất đem lại
+% cải thiện đáng kể so với baseline thuần túy.
+% Thay vì self-attention chuẩn (tất cả các cặp cạnh được xử lý như nhau),
+% v11 bổ sung một bias phụ thuộc vào \textit{loại quan hệ tô-pô} giữa hai cạnh trong đồ thị.
+
+% Với mỗi cặp cạnh $(u_1, v_1)$ và $(u_2, v_2)$, luận văn định nghĩa sáu loại quan hệ tô-pô $\tau$:
+% chain ($v_1 = u_2$ hoặc $v_2 = u_1$), fork ($u_1 = u_2$), collider ($v_1 = v_2$),
+% sibling, và không kết nối.
+% Attention logit được điều chỉnh bởi một bias vô hướng được học:
+% \begin{equation}
+%   A_{ij} = \frac{q_i \cdot k_j + b_{\tau(i,j)}}{\sqrt{d}},
+%   \label{eq:v11_bias}
+% \end{equation}
+% trong đó $b_\tau \in \mathbb{R}$ là bias được học cho từng loại $\tau$.
+% Tham số thêm vào rất ít (chỉ $|\tau|$ scalar bias), nhưng mang thông tin tô-pô
+% quan trọng: ví dụ, hai cạnh tạo chain $X \to v \to Y$ cần được attention mạnh hơn
+% khi phân loại Mediator.
+
+% Sự khác biệt căn bản với v3+/v4 là: v11 không cho attention
+% học mọi thứ từ dữ liệu quan sát thô mà chỉ học \textit{mức độ ưu tiên giữa các loại tô-pô},
+% không gian tham số nhỏ với prior rõ ràng về cấu trúc nhân quả.
+
+% \begin{figure}[h]
+%     \centering
+%     \includegraphics[width=0.75\linewidth]{figures/v11_structural_bias.png}
+%     \caption{Structural attention bias trong v11: bias vô hướng được học theo từng loại
+%              quan hệ tô-pô giữa cặp cạnh (chain, fork, collider, sibling, no-connect)
+%              được cộng vào attention logit trước softmax.}
+%     \label{fig:v11_bias}
+% \end{figure}
+
+% \subsection{Kết quả}
+
+% v11 (base, không augmentation) đạt $79.59\%$ local -- tăng $+2.65\%$ so với v8b ($76.94\%$)
+% và $+5.63\%$ so với baseline.
+% Đây là mức tăng lớn nhất từ bất kỳ thay đổi kiến trúc nào trong toàn bộ loạt thực nghiệm.
+
+% Khi kết hợp với XY augmentation, v11+ đạt $\mathbf{81.14\%}$ local
+% và $\mathbf{80.82\%}$ public leaderboard -- mức cao nhất trong toàn bộ thực nghiệm,
+% vượt v8b+ ($80.26\%$ / $80.22\%$) thêm $+0.88\%$ local và $+0.60\%$ public.
+
+% Điều đáng chú ý là mức tăng của XY augmentation trên nền v11 ($+1.55\%$)
+% nhỏ hơn đáng kể so với trên nền v8b ($+3.32\%$).
+% Nguyên nhân: structural bias đã mã hóa thông tin tô-pô về quan hệ giữa các cạnh và cặp $(X, Y)$
+% trực tiếp vào kiến trúc, nên augmentation (vốn giúp mô hình thấy nhiều góc nhìn $(X', Y')$ khác nhau)
+% có ít thông tin mới hơn để đóng góp thêm.
+
+% \subsection{Phân tích lỗi Mediator trong v11}
+
+% Dù v11 cải thiện đáng kể, Mediator vẫn là lớp khó nhất.
+% Phân tích 139 mẫu lỗi Mediator trong v11 cho thấy phân bố nhầm lẫn:
+% \begin{itemize}
+%   \item Consequence of X (ConseqX): 45 lỗi ($32\%$) -- mô hình thấy $X \to v$ nhưng không thấy $v \to Y$
+%   \item Cause of Y (CauseY): 34 lỗi ($24\%$) -- mô hình thấy $v \to Y$ nhưng không thấy $X \to v$
+%   \item Confounder: 30 lỗi ($22\%$)
+% \end{itemize}
+
+% Khoảng $57\%$ lỗi Mediator là do \textit{half-chain detection}:
+% mô hình nhận diện được một nửa chuỗi $X \to v \to Y$ nhưng không nhận diện được cả hai.
+% Chain bias hiện tại trong v11 kích hoạt cho tất cả cặp cạnh có $v_1 = u_2$,
+% không chỉ chuỗi đi qua $X$ và $Y$.
+% Một hướng cải thiện tiếp theo là thiết kế X/Y-aware chain bias,
+% chỉ kích hoạt với prior cao hơn cho chuỗi $X \to v \to Y$ cụ thể.
+
+% % =====================================================================
+% \section{Phân tích mô hình tốt nhất: v11 + XY Augmentation}
+% \label{sec:best_model}
+% % =====================================================================
+
+% \subsection{Kết quả tổng thể}
+
+% Mô hình v11 kết hợp với XY augmentation đạt \textbf{81.14\%} Balanced Accuracy
+% trên tập local và \textbf{80.82\%} trên public leaderboard --
+% vượt giải pháp hạng nhất chính thức (\textbf{76.70\%}) với biên độ $\mathbf{+4.12\%}$~\cite{olivetti2025adialab}.
+
+% \subsection{Kết quả per-class}
+
+% Bảng~\ref{tab:best_perclass} trình bày per-class recall của v8b+XYaug và v11+XYaug
+% so sánh với giải pháp hạng nhất chính thức.
+
+% \begin{table}[h]
+% \centering
+% \caption{Per-class recall (\%) của v8b+XYaug và v11+XYaug so sánh với
+%          giải pháp hạng nhất~\cite{olivetti2025adialab}.}
+% \label{tab:best_perclass}
+% \begin{tabular}{lcccc}
+% \hline
+% \textbf{Lớp} & \textbf{Rank 1} & \textbf{v8b+XYaug} & \textbf{v11+XYaug} & \textbf{$\Delta$ (v11+ vs Rank 1)} \\
+% \hline
+% Confounder       & 73.19 & 73.5  & --   & -- \\
+% Collider         & 70.17 & 79.2  & --   & -- \\
+% Mediator         & 65.67 & 72.7  & --   & -- \\
+% Cause of X       & 79.35 & 82.6  & --   & -- \\
+% Cause of Y       & 81.68 & 82.8  & --   & -- \\
+% Consequence of X & 76.53 & 80.6  & --   & -- \\
+% Consequence of Y & 80.80 & 82.8  & --   & -- \\
+% Independent      & 86.18 & 88.0  & --   & -- \\
+% \hline
+% \textbf{Balanced Accuracy} & \textbf{76.70} & \textbf{80.22} & \textbf{80.82} & $\mathbf{+4.12}$ \\
+% \hline
+% \multicolumn{5}{l}{\footnotesize Điểm per-class của v11+ sẽ được cập nhật từ kết quả thực nghiệm đầy đủ.}
+% \end{tabular}
+% \end{table}
+
+% Với v8b+XYaug, cải thiện lớn nhất xảy ra ở đúng hai lớp khó nhất:
+% Collider ($+9.0\%$) và Mediator ($+7.0\%$) so với hạng nhất.
+% Đây không phải ngẫu nhiên -- kênh ANM residual cung cấp tín hiệu trực tiếp
+% về phụ thuộc có điều kiện đặc trưng của Collider ($X \not\perp K \mid Y$),
+% trong khi XY augmentation cho phép mô hình thấy cùng biến $K$ đóng nhiều vai trò khác nhau
+% khi cặp $(X, Y)$ thay đổi, từ đó học biểu diễn tổng quát hơn.
+
+% \begin{figure}[h]
+%     \centering
+%     \includegraphics[width=0.85\linewidth]{figures/perclass_comparison.png}
+%     \caption{So sánh per-class recall giữa baseline v2, v8b+XYaug, v11+XYaug,
+%              và giải pháp hạng nhất chính thức.
+%              Trục ngang là 8 lớp, trục dọc là recall (\%).}
+%     \label{fig:perclass_comparison}
+% \end{figure}
+
+% \subsection{Đóng góp riêng của từng cải tiến}
+
+% Để tách biệt đóng góp của từng thành phần,
+% Bảng~\ref{tab:ablation_contribution} phân tích tích lũy theo từng bước.
+
+% \begin{table}[h]
+% \centering
+% \caption{Ablation: đóng góp tích lũy của từng thành phần so với baseline v2.}
+% \label{tab:ablation_contribution}
+% \begin{tabular}{lccc}
+% \hline
+% \textbf{Cấu hình} & \textbf{Local BA} & \textbf{$\Delta$ vs v2} & \textbf{Thành phần thêm} \\
+% \hline
+% v2: 3ch baseline               & 73.96\% & --       & -- \\
+% v5m: +multi-bw kernel          & 75.44\% & $+1.48$  & 2 kênh kernel ($h$=0.2, 1.0) \\
+% v8b: +ANM channels             & 76.94\% & $+2.98$  & 3 kênh ANM residual đa bw \\
+% v11: +structural bias          & 79.59\% & $+5.63$  & Attention bias theo tô-pô \\
+% v8b+: v8b + XY aug             & 80.26\% & $+6.30$  & XY augmentation (${\sim}11\times$) \\
+% v11+: v11 + XY aug             & \textbf{81.14\%} & $\mathbf{+7.18}$ & XY aug trên nền v11 \\
+% \hline
+% \end{tabular}
+% \end{table}
+
+% Bảng trên cho thấy đóng góp của từng thành phần:
+% multi-bw kernel $+1.48\%$, ANM channels $+1.50\%$ thêm,
+% structural bias $+2.65\%$ thêm so với v8b,
+% và XY augmentation $+1.55\%$ trên nền v11 (hay $+3.32\%$ trên nền v8b không có bias).
+% Hai cải tiến kết hợp (v11+) tạo ra tổng $+7.18\%$ so với baseline.
+
+% % =====================================================================
+% \section{Phân tích tổng hợp và bài học kinh nghiệm}
+% \label{sec:lessons}
+% % =====================================================================
+
+% \subsection{Đặc trưng thống kê có động cơ nhân quả vượt trội kiến trúc phức tạp}
+
+% Kết quả xuyên suốt cho thấy: \textit{bổ sung đặc trưng thống kê có lý do nhân quả rõ ràng}
+% (kernel regression đa băng thông, phần dư ANM) cải thiện hiệu suất nhất quán,
+% trong khi \textit{tăng độ phức tạp kiến trúc chung} (thêm attention branch, dual-path, node-centric)
+% đều thất bại.
+
+% Điều này nhất quán với phân tích của~\cite{olivetti2025adialab}:
+% các giải pháp top trong cuộc thi thành công nhờ
+% ``sophisticated feature engineering and representation learning'',
+% không phải nhờ kiến trúc phức tạp hơn.
+% Luận văn này cung cấp bằng chứng thực nghiệm cụ thể cho nhận định đó.
+
+% \subsection{Inductive bias tô-pô là chìa khóa cho cải tiến kiến trúc}
+
+% v11 là ngoại lệ quan trọng cho bài học trên: kiến trúc có thể giúp ích,
+% nhưng \textit{chỉ khi} mang inductive bias phù hợp với cấu trúc của bài toán.
+% Structural attention bias hoạt động vì nó mã hóa prior nhân quả tường minh
+% (chain, fork, collider) thay vì cho mô hình học mọi thứ từ đầu.
+% Sự khác biệt giữa v11 ($+2.65\%$ so với v8b) và v3+/v4 ($-1.19\%$ đến $-1.90\%$)
+% nằm không phải ở độ phức tạp mà ở tính phù hợp của inductive bias.
+
+% \subsection{Self-attention trên $O(p^2)$ cạnh là thành phần không thể thiếu}
+
+% Mọi thử nghiệm thay thế hay bypass self-attention trên tập cạnh đều giảm hiệu suất.
+% v4 (thêm obs transformer song song) overfit nặng do không có đủ inductive bias.
+% v9/v9d (node-centric, giảm bớt edge $O(p^2)$) không đạt được kết quả của v8b.
+% Điều này xác nhận rằng $O(p^2)$ edge self-attention là thành phần kiến trúc cốt lõi.
+
+% \subsection{Tăng cường dữ liệu X/Y remap là đóng góp kỹ thuật quan trọng nhất}
+
+% Trong tất cả các đóng góp, XY augmentation tạo ra cải thiện lớn nhất
+% ($+3.32\%$ trên nền v8b, $+1.55\%$ trên nền v11).
+% Cơ chế: thay vì học phân loại vai trò $K$ chỉ theo một góc nhìn $(X, Y)$,
+% mô hình được huấn luyện nhận ra cùng cấu trúc cục bộ từ ${\sim}11$ góc nhìn khác nhau.
+% Kết quả là biểu diễn tổng quát hơn và ít overfit hơn vào vị trí cụ thể của $X$, $Y$.
+% Kỹ thuật tương tự được dùng độc lập bởi giải pháp hạng 3 trong cuộc thi,
+% tăng ${\sim}5\%$ và là đóng góp chính của họ~\cite{olivetti2025adialab}.
+
+% \subsection{Hiệu ứng tương tác giữa structural bias và augmentation}
+
+% Mức tăng của XY augmentation trên nền v11 ($+1.55\%$)
+% nhỏ hơn đáng kể so với trên nền v8b ($+3.32\%$).
+% Nguyên nhân: structural bias đã mã hóa thông tin về quan hệ tô-pô $X$-$v$-$Y$
+% trực tiếp vào kiến trúc, nên augmentation có ít thông tin mới hơn để đóng góp.
+% Hai kỹ thuật bổ sung cho nhau nhưng có sự trùng lặp thông tin nhất định --
+% đây là bằng chứng gián tiếp về cơ chế hoạt động của structural bias.
+
+% % =====================================================================
+% \section*{Kết luận chương 5}
+% \addcontentsline{toc}{section}{Kết luận chương 5}
+% % =====================================================================
+
+% Chương 5 đã trình bày và phân tích toàn bộ kết quả thực nghiệm của 15 phiên bản mô hình
+% được phát triển trong quá trình nghiên cứu.
+% Kết quả phân hóa thành ba nhóm rõ rệt:
+% kiến trúc thuần túy thất bại, đặc trưng và dữ liệu thành công nhất quán,
+% và v11 là ngoại lệ quan trọng của kiến trúc với inductive bias.
+
+% Mô hình đề xuất tốt nhất -- v11 (8 kênh: 5 kernel đa băng thông + 3 ANM residual,
+% với structural attention bias tô-pô) kết hợp với XY remap augmentation --
+% đạt $\mathbf{81.14\%}$ Balanced Accuracy trên tập local
+% và $\mathbf{80.82\%}$ trên public leaderboard CrunchDAO,
+% vượt giải pháp hạng nhất của cuộc thi (\textbf{76.70\%}) với biên độ $+4.12\%$.
+% Bốn đóng góp kỹ thuật (multi-bandwidth kernel, ANM residuals,
+% structural attention bias, XY augmentation) giải quyết từng nguyên nhân cụ thể
+% của điểm yếu trong baseline, đặc biệt cải thiện mạnh ở Collider và Mediator
+% -- hai lớp khó nhất trong cuộc thi.
+
+\chapter{Results and Analysis}
+\label{chap:results}
+
+This chapter presents and analyzes the complete experimental results across all 16 model versions developed in the thesis, from the reimplemented baseline (v2) to the best proposed model (v11 + XY aug). Results are compared against the official first-place solution of the competition~\cite{olivetti2025adialab}.
+
+% =====================================================================
+\section{Overall Results by Version}
+\label{sec:overall_results}
+% =====================================================================
+
+Table~\ref{tab:full_results} presents Balanced Accuracy (local and public) for all model versions, ordered by development timeline.
+
+\begin{table}[h]
+\centering
+\caption{Balanced Accuracy (\%) for all model versions on the local set and public leaderboard. Column $\Delta$ shows deviation from baseline v2 on local.}
+\label{tab:full_results}
+\begin{tabular}{llccc}
+\hline
+\textbf{Ver.} & \textbf{Description} & \textbf{Local} & \textbf{$\Delta$} & \textbf{Public} \\
+\hline
+v2   & Baseline reimplementation (3ch)             & 73.96 & --         & 73.61 \\
+\hline
+\multicolumn{5}{l}{\textit{Architecture group (negative results)}} \\
+v3   & 5ch broadcast scalars                        & 72.46 & $-1.50$    & 72.13 \\
+v3+  & 5ch + obs cross-attention                    & 72.06 & $-1.90$    & 71.17 \\
+v4   & Full dual-path transformer                   & 72.77 & $-1.19$    & 68.76 \\
+v5   & StatProjector MLP at merge                   & 73.57 & $-0.39$    & 72.84 \\
+v6   & Structure-conditioned attention              & 72.28 & $-1.68$    & --    \\
+v9   & Node-centric design                          & 75.43 & $+1.47$    & --    \\
+v9d  & Dual-stream node                             & 75.65 & $+1.69$    & --    \\
+v10  & LightGBM (tabular baseline)                  & 63.11 & $-10.85$   & --    \\
+v13  & ML fullstack (XGB/LGBM/Cat + GNN + stack)    & 72.64 & $-1.32$    & --    \\
+\hline
+\multicolumn{5}{l}{\textit{Feature + data group (positive results)}} \\
+v5m  & Multi-bw kernel, 5ch                         & 75.44 & $+1.48$    & 74.80 \\
+v5a  & v5m + XY augmentation                        & 77.91 & $+3.95$    & 77.55 \\
+v8b  & 8ch: 5 kernel + 3 ANM                        & 76.94 & $+2.98$    & --    \\
+v8b+ & v8b + XY augmentation                        & 80.26 & $+6.30$    & 80.22 \\
+\hline
+\multicolumn{5}{l}{\textit{Architecture with topological inductive bias}} \\
+v11  & v8b + structural attention bias              & 79.59 & $+5.63$    & --    \\
+\rowcolor{codeyellow}
+v11+ & \textbf{v11 + XY augmentation}               & \textbf{81.14} & $\mathbf{+7.18}$ & \textbf{80.82} \\
+\hline
+\multicolumn{5}{l}{\textit{References}} \\
+     & First-place solution~\cite{olivetti2025adialab}  & -- & -- & 76.70 \\
+     & Third-place solution~\cite{olivetti2025adialab}  & -- & -- & 74.06 \\
+\hline
+\end{tabular}
+\end{table}
+
+Looking at the overall picture, the experiments fall into three groups. The \textit{pure architecture group} -- all attempts to modify the network structure (adding attention branches, dual-path designs, node-centric, etc.) -- either underperforms or matches the baseline. The \textit{feature and data group} -- adding multi-bandwidth kernel channels, ANM residual channels, and X/Y remap augmentation -- improves consistently. And the \textit{topological inductive bias group} (v11/v11+) is an important exception: architecture can help when designed with explicit causal prior. This is the central finding of the thesis and is analyzed in detail in subsequent sections.
+
+% =====================================================================
+\section{Architecture Experiment Analysis (Negative Results)}
+\label{sec:arch_results}
+% =====================================================================
+
+\subsection{v3: Broadcast Scalar Features (5 Channels)}
+
+Version v3 adds partial correlation and residual asymmetry as \textit{constants broadcast} into channels 4 and 5 of the edge tensor (every position in the length-$n=1000$ sequence receives the same scalar value). Results: local drops from 73.96\% to 72.46\% ($-1.50\%$), public drops to 72.13\%.
+
+The reason is clear: Conv1D learns local features along the spatial dimension of sequences. A constant channel with no spatial variation provides nothing for the network to learn, making these channels pure noise in the parameter space. \textit{Lesson: raw statistics cannot be injected as broadcast channels -- they must have spatial variation.}
+
+\subsection{v3+: Observation Cross-Attention Branch}
+
+Version v3+ adds a cross-attention branch over raw observations $(u,v)$: an MLP projects each pair $(u_i, v_i)$ into a token, then cross-attention operates with $Q$ from the conv representation and $KV$ from the observation tokens. Results: 72.06\% local / 71.17\% public -- worse even than v3.
+
+The observation branch adds approximately 100K parameters without appropriate inductive bias: unconstrained attention over 1000 observations has no knowledge of which observations are causally relevant, so it learns noise and overfits. The local-public gap ($0.89\%$) is larger than v3, confirming overfitting.
+
+\subsection{v4: Full Dual-Path Transformer}
+
+Version v4 is the most complex architecture: conv path + observation transformer (2 self-attention layers over 1000 observation tokens + learned query pooling) + bidirectional cross-attention in both directions (conv$\to$obs and obs$\to$conv) + fusion merge. Total approximately 240K parameters. Results: 72.77\% local, but only 68.76\% public -- the largest local-public gap of all experiments ($-4.01\%$ relative to baseline on public), indicating severe overfitting. This experiment had to run on the A100 80GB due to OOM on the A100 40GB with $p=10$ graphs.
+
+\subsection{v5: StatProjector MLP}
+
+Version v5 addresses v3's problem more correctly: partial correlation and residual asymmetry are fed through a dedicated MLP (StatProjector: $2 \to 64 \to 64$) as \textit{per-edge scalars} and injected at the merge step as a third input. Local results: 73.57\% -- close to baseline but still below on public (72.84\%). StatProjector improves the hard classes meaningfully (Mediator $+2.2\%$, Collider $+2.0\%$, Confounder $+1.7\%$) but hurts easier classes, resulting in a net negative globally. \textit{Lesson: statistical features should be injected after Conv1D and global pooling, not at the merge step before self-attention.}
+
+\subsection{v6: Structure-Conditioned Attention}
+
+Version v6 implements a 2-stage design: Stage 1 predicts edge structure (edge classifier) and saves edge embeddings; Stage 2 uses the predicted structure to bias attention -- edges sharing nodes attend more strongly to each other according to the predicted adjacency matrix. Results: 72.28\% local, below baseline. Attention bias conditioned on predicted structure is corrupted by Stage 1 errors, and using the predicted structure to guide attention creates uncontrolled error propagation.
+
+\subsection{v9, v9d: Node-Centric Designs}
+
+v9 and v9d redesign the pipeline from node-centric rather than edge-centric, achieving only 75.43\% and 75.65\% local -- below v8b (76.94\%) despite comparable complexity. Node-centric design reduces the $O(p^2)$ edge context, preventing the model from capturing long-range dependencies between edges in the graph. This confirms that the edge-centric representation of the original solution is the correct architectural choice for this problem.
+
+\subsection{v10: LightGBM Tabular Approach}
+
+Version v10 tests a tabular ML approach (LightGBM) with manual statistical features, achieving only 63.11\% local -- $10.85\%$ below the baseline. This confirms that the end-to-end deep learning approach significantly outperforms manual feature engineering + gradient boosting for this problem, even though rank 3--5 solutions in the competition used XGBoost/LightGBM effectively with very sophisticated feature engineering (923--7000 features)~\cite{olivetti2025adialab}. The key difference lies in the scale of feature engineering: tabular ML needs features designed at a very high level of sophistication to compete with learned deep representations.
+
+\subsection{v13: Full ML Pipeline (Fullstack)}
+
+Version v13 is the most comprehensive ML experiment, implementing a four-stage pipeline: (1) 300+ statistical features per node-pair including Pearson/Spearman/partial correlations, conditional mutual information, HSIC, ANM scores, BIC scores, and regression residuals; (2) classical causal discovery outputs from PC, LiNGAM, NOTEARS, and GES algorithms as additional features; (3) an XGBoost/LightGBM/CatBoost ensemble with X/Y remap augmentation (proper column swap: src$\leftrightarrow$X, tgt$\leftrightarrow$Y); (4) a GNN refinement stage over the predicted graph and a final stacking layer. Despite this substantial engineering effort, v13 achieves only \textbf{72.64\%} local -- marginally below baseline ($-1.32\%$) and far below v11+ ($-8.50\%$).
+
+This result is the most definitive evidence in the thesis for the superiority of the DL approach over the ML approach for this problem. The scalar features extracted in v13 encode the same conditional independence information that the Conv1D learns implicitly from functional curves -- but the scalar representation loses the nonlinear shape information that is critical for distinguishing similar role pairs. Tree-based models operating on fixed feature vectors cannot recover the rich structural patterns captured by Conv1D operating on the full length-1000 sorted-and-regressed sequences. This finding is significant: it establishes that the key information for causal role classification is encoded in the \textit{functional form} of relationships, not merely in aggregate statistical summaries.
+
+% =====================================================================
+\section{Feature and Data Experiment Analysis (Positive Results)}
+\label{sec:feature_results}
+% =====================================================================
+
+\subsection{v5m: Multi-Bandwidth Kernel Regression (5 Channels)}
+
+Rather than using a single fixed bandwidth $h = 0.5$ as in v2, v5m adds two kernel channels at $h \in \{0.2, 1.0\}$, creating a 5-channel edge tensor (2 sorted + 3 multi-bw kernel). Results: 75.44\% local / 74.80\% public, an increase of $+1.48\%$ over the baseline.
+
+This improvement is meaningful: each bandwidth captures a different smoothness scale of the nonlinear relationship between $u$ and $v$. $h = 0.2$ is sensitive to local structure (sharp slopes, discontinuities), $h = 1.0$ reflects global trends (linear, monotone). The Conv1D model can learn to combine information at multiple spatial scales.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.75\linewidth]{figures/multibw_effect.png}
+    \caption{Per-class recall comparison between v2 baseline and v5m (multi-bw kernel). Classes involving causal direction detection (CauseX, CauseY, ConseqX, ConseqY) improve the most.}
+    \label{fig:multibw_effect}
+\end{figure}
+
+\subsection{v5a: XY Augmentation on v5m Architecture}
+
+v5a applies X/Y remap augmentation (~\ref{sec:xyaug}) on the v5m architecture, expanding from 23,500 original datasets to ${\sim}263$K training samples. Results: 77.91\% local / 77.55\% public, an increase of $+3.95\%$ over baseline and $+2.47\%$ over v5m.
+
+This is the first breakthrough surpassing the official first-place solution (76.70\%) on the public leaderboard. The result confirms that X/Y augmentation is a highly effective technique: it not only increases sample count but also increases the \textit{diversity} of perspectives from which the model observes the same causal structure through different $(X', Y')$ viewpoints.
+
+\subsection{v8b: 8 Channels (5 Kernel + 3 ANM)}
+
+v8b extends v5m by adding 3 multi-bandwidth ANM residual channels $r_h(u_{\sigma(i)}) = v_{\sigma(i)} - \hat{m}_h(u_{\sigma(i)})$ with $h \in \{0.2, 0.5, 1.0\}$, creating an 8-channel edge tensor. Results: 76.94\% local ($+2.98\%$ over baseline).
+
+Improvement concentrates on the two hardest classes: Collider increases $+6.1\%$ and Consequence of X increases $+5.0\%$ compared to v5m alone. This is consistent with ANM theory: the regression residual in the true causal direction should be nearly independent of the source variable, while the reverse direction exhibits stronger nonlinear dependence. The model learns this asymmetric signature from the distributional shape of sequences $\mathbf{c}_{6..8}$.
+
+\subsection{v8b + XY Augmentation}
+
+Combining v8b with XY augmentation achieves \textbf{80.26\%} local / \textbf{80.22\%} public, an increase of $+6.30\%$ over baseline and $+3.32\%$ over v8b alone. This is the first result to exceed 80\% and confirms a synergistic effect between the two techniques: ANM channels improve local causal direction detection, while XY augmentation improves generalization across multiple $(X, Y)$ viewpoints.
+
+% =====================================================================
+\section{Analysis of v11: Structural Attention Bias}
+\label{sec:v11_analysis}
+% =====================================================================
+
+\subsection{Design and Motivation}
+
+v11 is the sole exception in the architecture group: the only architectural change to deliver significant improvement over the pure baseline. Rather than standard self-attention (treating all edge pairs identically), v11 adds a bias dependent on the \textit{topological relationship type} between two edges in the graph.
+
+For each pair of edges $(u_1, v_1)$ and $(u_2, v_2)$, six topological relationship types $\tau$ are defined: chain ($v_1 = u_2$ or $v_2 = u_1$), fork ($u_1 = u_2$), collider ($v_1 = v_2$), reverse (same pair, opposite direction), sibling, and unrelated. The attention logit is adjusted by a learned scalar bias:
+\begin{equation}
+  A_{ij} = \frac{q_i \cdot k_j + b_{\tau(i,j)}}{\sqrt{d}},
+  \label{eq:v11_bias}
+\end{equation}
+where $b_\tau \in \mathbb{R}$ is the learned bias for each type $\tau$. The additional parameters are only $|\tau| = 6$ scalars -- negligible -- yet they encode critical topological information: for example, two edges forming a chain $X \to v \to Y$ should be attended to more strongly when classifying Mediator.
+
+The fundamental difference from v3+/v4 is that v11 does not allow attention to learn everything from raw observational data but instead only learns the \textit{degree of priority among topological types}, with a small parameter space and explicit causal prior about graph structure.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.75\linewidth]{figures/v11_structural_bias.png}
+    \caption{Structural attention bias in v11: a learned scalar bias indexed by topological relationship type between the edge pair (chain, fork, collider, reverse, unrelated) is added to the attention logit before softmax.}
+    \label{fig:v11_bias}
+\end{figure}
+
+\subsection{Results}
+
+v11 (base, without augmentation) achieves $79.59\%$ local -- an increase of $+2.65\%$ over v8b ($76.94\%$) and $+5.63\%$ over the baseline. This is the largest improvement from any single architectural change across all experiments.
+
+When combined with XY augmentation, v11+ achieves $\mathbf{81.14\%}$ local and $\mathbf{80.82\%}$ public leaderboard -- the highest result across all experiments, surpassing v8b+ ($80.26\%$ / $80.22\%$) by an additional $+0.88\%$ local and $+0.60\%$ public.
+
+A notable observation is that the marginal gain of XY augmentation on top of v11 ($+1.55\%$) is substantially smaller than on top of v8b ($+3.32\%$). This is because structural bias already encodes topological information about the relationships between edges and the $(X, Y)$ pair directly into the architecture, leaving less new information for augmentation (which provides multiple $(X', Y')$ viewpoints) to contribute.
+
+\subsection{Mediator Error Analysis in v11}
+
+Despite v11's significant improvement, Mediator remains the hardest class. Analysis of 139 Mediator error samples in v11 reveals the following misclassification distribution:
+\begin{itemize}
+  \item Consequence of X (ConseqX): 45 errors ($32\%$) -- model detects $X \to v$ but misses $v \to Y$
+  \item Cause of Y (CauseY): 34 errors ($24\%$) -- model detects $v \to Y$ but misses $X \to v$
+  \item Confounder: 30 errors ($22\%$)
+\end{itemize}
+
+Approximately $57\%$ of Mediator errors stem from \textit{half-chain detection}: the model identifies one half of the chain $X \to v \to Y$ but fails to identify both. The current chain bias in v11 activates for all edge pairs where $v_1 = u_2$, not specifically for chains passing through both $X$ and $Y$. A promising direction for further improvement is designing X/Y-aware chain bias that activates with higher prior specifically for the chain $X \to v \to Y$.
+
+% =====================================================================
+\section{Best Model Analysis: v11 + XY Augmentation}
+\label{sec:best_model}
+% =====================================================================
+
+\subsection{Overall Performance}
+
+The v11 model combined with XY augmentation achieves \textbf{81.14\%} Balanced Accuracy on the local test set and \textbf{80.82\%} on the CrunchDAO public leaderboard -- surpassing the official first-place solution (\textbf{76.70\%}) by a margin of $\mathbf{+4.12\%}$~\cite{olivetti2025adialab}.
+
+\subsection{Per-Class Results}
+
+Table~\ref{tab:best_perclass} presents per-class recall for v8b+XYaug and v11+XYaug compared against the official first-place solution.
+
+\begin{table}[h]
+\centering
+\caption{Per-class recall (\%) of v8b+XYaug and v11+XYaug compared to the first-place solution~\cite{olivetti2025adialab}.}
+\label{tab:best_perclass}
+\begin{tabular}{lcccc}
+\hline
+\textbf{Class} & \textbf{Rank 1} & \textbf{v8b+XYaug} & \textbf{v11+XYaug} & \textbf{$\Delta$ (v11+ vs Rank 1)} \\
+\hline
+Confounder       & 73.19 & 73.5  & --   & -- \\
+Collider         & 70.17 & 79.2  & --   & -- \\
+Mediator         & 65.67 & 72.7  & --   & -- \\
+Cause of X       & 79.35 & 82.6  & --   & -- \\
+Cause of Y       & 81.68 & 82.8  & --   & -- \\
+Consequence of X & 76.53 & 80.6  & --   & -- \\
+Consequence of Y & 80.80 & 82.8  & --   & -- \\
+Independent      & 86.18 & 88.0  & --   & -- \\
+\hline
+\textbf{Balanced Accuracy} & \textbf{76.70} & \textbf{80.22} & \textbf{80.82} & $\mathbf{+4.12}$ \\
+\hline
+\multicolumn{5}{l}{\footnotesize Per-class results for v11+ to be updated from final experimental run.}
+\end{tabular}
+\end{table}
+
+For v8b+XYaug, the largest improvements occur at exactly the two hardest classes: Collider ($+9.0\%$) and Mediator ($+7.0\%$) over the first-place solution. This is not coincidental -- the ANM residual channels provide a direct signal for the conditional dependence characteristic of Colliders ($X \not\perp K \mid Y$), while XY augmentation allows the model to observe the same variable $K$ playing multiple different roles as the $(X, Y)$ pair changes, learning a more generalizable representation.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.85\linewidth]{figures/perclass_comparison.png}
+    \caption{Per-class recall comparison between baseline v2, v8b+XYaug, v11+XYaug, and the official first-place solution. Horizontal axis: 8 classes; vertical axis: recall (\%).}
+    \label{fig:perclass_comparison}
+\end{figure}
+
+\subsection{Contribution of Each Improvement}
+
+To isolate each component's contribution, Table~\ref{tab:ablation_contribution} analyzes cumulative improvements step by step.
+
+\begin{table}[h]
+\centering
+\caption{Ablation: cumulative contribution of each component relative to baseline v2.}
+\label{tab:ablation_contribution}
+\begin{tabular}{lccc}
+\hline
+\textbf{Configuration} & \textbf{Local BA} & \textbf{$\Delta$ vs v2} & \textbf{Component added} \\
+\hline
+v2: 3ch baseline               & 73.96\% & --       & -- \\
+v5m: +multi-bw kernel          & 75.44\% & $+1.48$  & 2 extra kernel channels ($h$=0.2, 1.0) \\
+v8b: +ANM channels             & 76.94\% & $+2.98$  & 3 ANM residual channels, multi-bw \\
+v11: +structural bias          & 79.59\% & $+5.63$  & Topology-aware attention bias (6 params) \\
+v8b+: v8b + XY aug             & 80.26\% & $+6.30$  & XY augmentation (${\sim}11\times$ data) \\
+v11+: v11 + XY aug             & \textbf{81.14\%} & $\mathbf{+7.18}$ & XY aug on top of v11 \\
+\hline
+\end{tabular}
+\end{table}
+
+The table shows each component's marginal contribution: multi-bw kernel $+1.48\%$, ANM channels $+1.50\%$ additional, structural bias $+2.65\%$ additional over v8b, and XY augmentation $+1.55\%$ on top of v11 (or $+3.32\%$ on top of v8b without bias). The two final improvements combined (v11+) yield a total of $+7.18\%$ over baseline.
+
+% =====================================================================
+\section{Synthesis and Lessons Learned}
+\label{sec:lessons}
+% =====================================================================
+
+\subsection{Causally-Motivated Statistical Features Outperform Architectural Complexity}
+
+Results across all experiments show that \textit{adding statistically-motivated features with clear causal reasoning} (multi-bandwidth kernel regression, ANM residuals) improves performance consistently, while \textit{increasing overall architectural complexity} (adding attention branches, dual-path, node-centric) fails. This is consistent with the analysis in~\cite{olivetti2025adialab}: top solutions in the competition succeeded through ``sophisticated feature engineering and representation learning,'' not through more complex architectures. This thesis provides concrete empirical evidence for that claim.
+
+The v13 ML fullstack experiment provides the strongest version of this evidence: 300+ features, four causal discovery algorithms, three gradient boosting models, a GNN refinement stage, and stacking achieve only 72.64\% -- significantly below the Conv1D baseline at 73.96\%. This demonstrates that what matters is not the quantity of features but the \textit{representational form}: the functional curves captured by sorted+kernel channels contain information about nonlinear causal relationships that cannot be compressed into scalar summaries without loss.
+
+\subsection{Topological Inductive Bias is the Key to Beneficial Architectural Changes}
+
+v11 is an important exception to the lesson above: architecture can help, but \textit{only when} carrying inductive bias appropriate to the problem structure. Structural attention bias works because it encodes explicit causal priors (chain, fork, collider) rather than learning everything from scratch. The difference between v11 ($+2.65\%$ over v8b) and v3+/v4 ($-1.19\%$ to $-1.90\%$) lies not in complexity but in the appropriateness of the inductive bias.
+
+\subsection{Edge-Level $O(p^2)$ Self-Attention is an Irreplaceable Component}
+
+Every attempt to replace or bypass self-attention over the edge set degrades performance. v4 (adding parallel obs transformer) severely overfits due to insufficient inductive bias. v9/v9d (node-centric, reducing $O(p^2)$ edge context) fail to match v8b's performance. This confirms that $O(p^2)$ edge self-attention is the core architectural component enabling global graph reasoning.
+
+\subsection{X/Y Remap Augmentation is the Most Impactful Technical Contribution}
+
+Among all contributions, XY augmentation delivers the largest single improvement ($+3.32\%$ on v8b, $+1.55\%$ on v11). The mechanism: instead of learning to classify the role of $K$ from only one $(X, Y)$ perspective, the model is trained to recognize the same local structure from ${\sim}11$ different perspectives. The result is a more generalizable representation that is less overfit to the specific positions of $X$ and $Y$. A similar technique was independently used by the rank-3 solution in the competition, yielding approximately $+5\%$ improvement and being identified as their primary contribution~\cite{olivetti2025adialab}.
+
+\subsection{Interaction Effect Between Structural Bias and Augmentation}
+
+The marginal gain of XY augmentation on v11 ($+1.55\%$) is substantially smaller than on v8b ($+3.32\%$). The reason: structural bias already encodes topological information about the $X$-$v$-$Y$ relationship directly into the architecture, so augmentation -- which helps the model see multiple $(X', Y')$ viewpoints -- has less new information to contribute. The two techniques are complementary but have partial information overlap -- this is indirect evidence for the mechanism by which structural bias operates.
+
+\subsection{DL vs.\ ML: A Systematic Comparison}
+
+The thesis provides an unusually comprehensive comparison between deep learning and machine learning approaches across multiple experiments (v10 LightGBM: 63.11\%, v13 ML fullstack: 72.64\%, v2 DL baseline: 73.96\%, v11+ best DL: 81.14\%). The conclusion is unambiguous: for this specific problem, deep learning significantly outperforms tabular machine learning regardless of feature engineering sophistication. The Conv1D architecture's ability to learn directly from length-1000 functional curves -- capturing nonlinear shape, curvature, and heteroscedasticity patterns -- provides information that no fixed set of scalar features can recover. This finding has implications for similar causal role classification problems in other domains.
+
+% =====================================================================
+\section*{Chapter 5 Summary}
+\addcontentsline{toc}{section}{Chapter 5 Summary}
+% =====================================================================
+
+This chapter presented and analyzed the complete experimental results for all 16 model versions developed during the research. Results partition into three clear groups: pure architecture fails; features and data succeed consistently; and v13 ML fullstack definitively confirms DL superiority over manual feature engineering ($72.64\%$ vs $81.14\%$). The v11 structural attention bias is an important exception that reveals the principle underlying successful architectural changes.
+
+The best proposed model -- v11 (8 channels: 5 multi-bandwidth kernel + 3 multi-bandwidth ANM residuals, with topology-aware structural attention bias) combined with X/Y remap augmentation -- achieves $\mathbf{81.14\%}$ Balanced Accuracy on the local test set and $\mathbf{80.82\%}$ on the CrunchDAO public leaderboard, surpassing the competition's first-place solution (\textbf{76.70\%}) by a margin of $+4.12\%$. The four technical contributions (multi-bandwidth kernel, ANM residuals, structural attention bias, XY augmentation) each address specific causes of weakness in the baseline, with particularly strong improvements on Collider and Mediator -- the two hardest classes in the competition.

@@ -1,0 +1,20 @@
+\begin{center}
+\textbf{\large{Abstract}	}
+\end{center}
+
+\addcontentsline{toc}{chapter}{Abstract}
+
+\begin{small}
+
+Causal discovery on time series data is a pivotal field in data science, playing a crucial role in understanding the underlying mechanisms of complex systems rather than merely relying on statistical correlation analysis \cite{crunchdao_causal_2024}. In this report, I present a study on the problem of discovering Directed Acyclic Graph (DAG) structures from multivariate time series data, based on the competition organized by ADIA Lab in collaboration with CrunchDAO.
+
+The problem focuses on identifying the causal relationship between two primary variables: the treatment ($X$) and the outcome ($Y$), while simultaneously classifying the roles of the remaining variables within the system. These variables are categorized into eight functional roles, including: confounders, colliders, mediators, independent variables, and variables belonging to the causal or consequential chains of $X$ and $Y$ \cite{crunchdao_causal_2024}. This task presents a significant challenge due to the presence of noise and the complex dependency structures inherent in real-world time series data.
+
+To address this problem, I investigate and apply modern causal discovery methods, encompassing both unsupervised approaches based on conditional independence testing and supervised approaches leveraging the power of machine learning models. The experimental process was conducted on a large-scale dataset comprising 47,000 samples provided by the CrunchDAO platform \cite{crunchdao_causal_2024}, with varying numbers of variables to verify the robustness and generalization capabilities of the models.
+
+Research results were evaluated using the Multiclass Balanced Accuracy metric, focusing on the ability to accurately identify the logical roles of nodes relative to the $X \rightarrow Y$ pair. This study goes beyond merely predicting the existence of edges, aiming to refine models to minimize errors in identifying the system's logical structure, thereby providing an effective framework for discovering causal knowledge from time series data.
+
+\vspace*{1cm}
+\textbf{Keywords}: Causal Discovery, Time Series, Directed Acyclic Graph (DAG), CrunchDAO \cite{crunchdao_causal_2024}.
+
+\end{small}

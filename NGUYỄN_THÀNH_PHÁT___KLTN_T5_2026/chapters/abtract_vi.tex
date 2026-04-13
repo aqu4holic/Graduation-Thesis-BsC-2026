@@ -1,0 +1,20 @@
+\begin{center}
+\textbf{\large{Tóm tắt}	}
+\end{center}
+
+\addcontentsline{toc}{chapter}{Tóm tắt}
+
+\begin{small}
+
+Suy luận nhân quả trên dữ liệu chuỗi thời gian là một lĩnh vực then chốt trong khoa học dữ liệu, đóng vai trò quan trọng trong việc hiểu rõ cơ chế vận hành của các hệ thống phức tạp thay vì chỉ dừng lại ở phân tích tương quan thống kê \cite{crunchdao_causal_2024}. Trong báo cáo này, tôi trình bày nghiên cứu về bài toán xác định cấu trúc đồ thị có hướng không chu trình (Directed Acyclic Graph - DAG) từ dữ liệu chuỗi thời gian đa biến dựa trên bối cảnh cuộc thi do ADIA Lab phối hợp cùng CrunchDAO tổ chức.
+
+Bài toán tập trung vào việc xác định mối quan hệ nhân quả giữa hai biến đặc biệt: biến can thiệp ($X$) và biến kết quả ($Y$), đồng thời phân loại vai trò của các biến còn lại trong hệ thống. Các biến này được phân định vào tám danh mục chức năng cụ thể bao gồm: biến gây nhiễu (Confounder), biến điều tiết (Collider), biến trung gian (Mediator), biến độc lập, và các biến thuộc chuỗi hệ quả hoặc nguyên nhân của $X$ và $Y$ \cite{crunchdao_causal_2024}. Đây là một thách thức lớn do sự hiện diện của các yếu tố nhiễu và cấu trúc phụ thuộc phức tạp trong dữ liệu thực tế.
+
+Để giải quyết bài toán này, tôi khảo sát và áp dụng các phương pháp suy luận nhân quả hiện đại, bao gồm cả hướng tiếp cận không giám sát (unsupervised) dựa trên kiểm định tính độc lập điều kiện và hướng tiếp cận có giám sát (supervised) tận dụng sức mạnh của các mô hình học máy. Quá trình thực nghiệm được thực hiện trên tập dữ liệu quy mô lớn gồm 47,000 mẫu được cung cấp bởi nền tảng CrunchDAO \cite{crunchdao_causal_2024}, với số lượng biến biến thiên nhằm kiểm chứng tính bền vững và khả năng tổng quát hóa của các mô hình.
+
+Kết quả nghiên cứu được đánh giá dựa trên chỉ số độ chính xác cân bằng đa lớp (Multiclass Balanced Accuracy), tập trung vào khả năng nhận diện chính xác vai trò logic của các nút mạng đối với cặp biến $X \rightarrow Y$. Nghiên cứu không chỉ dừng lại ở việc dự đoán sự tồn tại của các cạnh mà còn hướng tới việc tinh chỉnh mô hình để giảm thiểu sai số trong việc xác định cấu trúc hệ thống, từ đó cung cấp một quy trình hiệu quả cho việc khám phá tri thức từ dữ liệu chuỗi thời gian.
+
+\vspace*{1cm}
+\textbf{Từ khóa}: Suy luận nhân quả (Causal Discovery), Chuỗi thời gian (Time Series), Đồ thị có hướng không chu trình (DAG), CrunchDAO \cite{crunchdao_causal_2024}.
+
+\end{small}

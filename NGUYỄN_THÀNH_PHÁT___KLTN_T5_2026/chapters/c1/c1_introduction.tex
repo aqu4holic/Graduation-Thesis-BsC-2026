@@ -1,0 +1,214 @@
+% \chapter{Đặt vấn đề}
+
+% Chương này cần trình bày được:
+% \begin{itemize}
+%     \item Bối cảnh và lý do chọn đề tài: Bài toán KLTN giải quyết là gì, trong bối cảnh Khoa học/kỹ thuật/thực tiễn như thế nào? Vì sao đề tài này quan trọng và có ý nghĩa?
+
+%     \item Mô tả bài toán: Phát biểu rõ ràng bài toán mà KLTN giải quyết, gồm đầu vào, đầu ra, phạm vi và các giả định (nếu có)
+
+%     \item Mục tiêu và phạm vi nghiên cứu của KLTN
+%     \item Cấu trúc KLTN
+% \end{itemize}
+
+% \chapter{Đặt vấn đề}
+% \label{chap:intro}
+
+% % =====================================================================
+% \section{Giới thiệu bài toán}
+% % =====================================================================
+
+% Trong khoa học dữ liệu và thống kê, việc hiểu \textit{quan hệ nhân quả} giữa các biến số quan trọng hơn nhiều so với đơn thuần đo lường tương quan. Tương quan có thể xuất hiện do nhiều nguyên nhân khác nhau -- biến chung ẩn (confounder), quan hệ trung gian (mediator), hay chỉ đơn giản là sự trùng hợp thống kê -- trong khi quan hệ nhân quả phản ánh cơ chế vận hành thực sự của hệ thống~\cite{pearl2009causality}. Xác định đúng cấu trúc nhân quả là nền tảng cho nhiều bài toán thực tiễn: thiết kế thực nghiệm, đánh giá tác động chính sách, phân tích rủi ro trong tài chính, và suy luận nhân quả trong y học~\cite{hasan2023survey_arxiv}.
+
+% Bài toán trong khóa luận này được xây dựng dựa trên \textbf{ADIA Lab Causal Discovery Challenge}~\cite{crunchdao_causal_2024, crunchdao_adia_docs}, một cuộc thi khoa học dữ liệu do ADIA Lab phối hợp cùng CrunchDAO tổ chức. Cụ thể, bài toán yêu cầu: cho một tập dữ liệu gồm $n = 1000$ quan sát trên $p \in \{3,\ldots,10\}$ biến, trong đó luôn có cạnh nhân quả $X \to Y$ (với $X$ là biến can thiệp, $Y$ là biến kết quả), hãy \textbf{phân loại vai trò} của mỗi biến $K$ còn lại vào một trong \textbf{8 lớp}: Confounder, Mediator, Collider, Independent, Cause of X, Consequence of X, Cause of Y, Consequence of Y.
+
+% Đây là bài toán \textit{phân loại đa lớp có giám sát}: với 47,000 tập dữ liệu huấn luyện, mô hình cần học được các đặc trưng thống kê và cấu trúc đồ thị tiềm ẩn để phân biệt tám vai trò -- một số trong đó có biểu hiện thống kê rất gần nhau và khó phân biệt. Hiệu quả được đo bằng chỉ số \textit{Multiclass Balanced Accuracy}~\cite{crunchdao_adia_docs}.
+
+% % =====================================================================
+% \begin{figure}[h]
+%     \centering
+%     \includegraphics[width=0.75\linewidth]{figures/eight_roles_dag.png}
+%     \caption{Minh họa tám vai trò của biến $K$ đối với quan hệ $X \to Y$:
+%              mỗi vai trò tương ứng với một cấu trúc DAG cục bộ khác nhau.}
+%     \label{fig:eight_roles}
+% \end{figure}
+
+% \section{Động lực và thách thức}
+% % =====================================================================
+
+% Mặc dù nhiều thuật toán suy luận nhân quả cổ điển đã được đề xuất (PC, LiNGAM, NOTEARS, v.v.), các phương pháp này thường hướng đến học \textit{toàn bộ cấu trúc DAG} và gặp khó khăn khi cần phân loại chính xác \textit{vai trò từng biến} trong bối cảnh dữ liệu quan sát có kích thước hữu hạn~\cite{spirtes2000causation}.
+
+% Bài toán ADIA Lab đặt ra một số thách thức đặc thù:
+
+% \begin{itemize}
+%   \item \textbf{Phân biệt các cặp lớp tương tự:} Ví dụ, Confounder ($K \to X$, $K \to Y$)
+%         và Cause of X ($K \to X$, không có $K \to Y$) đều tạo ra tương quan giữa $K$ và $X$;
+%         hay Mediator ($X \to K \to Y$) và Consequence of X ($X \to K$, không ảnh hưởng $Y$)
+%         đều có $X \to K$ -- sự khác biệt nằm ở những tín hiệu rất nhỏ trong dữ liệu.
+
+%   \item \textbf{Mất cân bằng lớp:} Tám lớp không phân bố đều,
+%         đặc biệt lớp Mediator và Collider có số mẫu thấp hơn các lớp khác,
+%         dẫn đến xu hướng mô hình bỏ qua các lớp thiểu số nếu không có chiến lược xử lý phù hợp.
+
+%   \item \textbf{Bất biến hoán vị:} Số biến $p$ thay đổi từ 3 đến 10, và thứ tự đặt tên biến
+%         không mang ý nghĩa ngữ nghĩa -- mô hình cần bất biến với hoán vị biến.
+
+%   \item \textbf{Dữ liệu phi tuyến:} Quan hệ giữa các biến không nhất thiết tuyến tính;
+%         đặc trưng thống kê đơn giản như tương quan Pearson thường không đủ để phân biệt các vai trò.
+% \end{itemize}
+
+% Các giải pháp cổ điển được ban tổ chức cung cấp sẵn (PC algorithm, Random Forest, deep learning baseline) chỉ đạt khoảng \textbf{40\%} Balanced Accuracy~\cite{olivetti2025adialab} -- chưa xa so với ngưỡng random guessing 12.5\% (1/8).
+% Giải pháp hạng nhất trong cuộc thi~\cite{adia_rank1_report} đã giải quyết các thách thức này
+% bằng một kiến trúc học sâu end-to-end: biểu diễn mỗi cặp biến như một \textit{edge tensor} 3 kênh
+% (bao gồm đặc trưng hồi quy kernel phi tuyến), sau đó dùng Conv1D residual
+% và self-attention để học biểu diễn toàn đồ thị và phân loại vai trò từng biến,
+% đạt \textbf{76.70\%} Balanced Accuracy~\cite{olivetti2025adialab}.
+% Luận văn này tái hiện lại giải pháp đó, phân tích các thành phần, và đề xuất
+% mở rộng lên 8 kênh đặc trưng kết hợp với tăng cường dữ liệu X/Y remap,
+% từ đó đạt \textbf{80.22\%} trên public leaderboard -- vượt qua giải pháp hạng nhất.
+
+% % =====================================================================
+% \section{Mục tiêu và phạm vi khóa luận}
+% % =====================================================================
+
+% Khóa luận này có hai mục tiêu chính:
+
+% \begin{enumerate}
+%   \item \textbf{Tái hiện và phân tích} giải pháp hạng nhất của ADIA Lab Causal Discovery Challenge:
+%         hiểu rõ từng thành phần kiến trúc, quy trình huấn luyện, và lý do hiệu quả của từng lựa chọn thiết kế.
+%         Mục tiêu này tạo ra một baseline vững chắc với điểm số có thể tái lập được.
+
+%   \item \textbf{Đề xuất cải tiến} nhằm nâng cao Balanced Accuracy,
+%         đặc biệt trên các lớp khó (Mediator, Collider),
+%         thông qua các hướng: bổ sung kênh đặc trưng, cải tiến kiến trúc,
+%         và chiến lược huấn luyện.
+% \end{enumerate}
+
+% \textbf{Phạm vi:} Khóa luận tập trung vào dữ liệu quan sát i.i.d.\ theo thiết lập của ADIA Lab
+% (không phải chuỗi thời gian có autocorrelation).
+% Mô hình được triển khai và đánh giá trên nền tảng CrunchDAO
+% bằng chỉ số Multiclass Balanced Accuracy chính thức.
+
+% % =====================================================================
+% \section{Đóng góp của khóa luận}
+% % =====================================================================
+
+% Các đóng góp cụ thể của khóa luận bao gồm:
+
+% \begin{itemize}
+%   \item \textbf{Tái hiện và phân tích chi tiết giải pháp hạng nhất:}
+%         Cài đặt lại toàn bộ pipeline -- từ xây dựng edge tensor (3 kênh, hồi quy kernel)
+%         đến kiến trúc Conv1D residual + self-attention + dual-head loss --
+%         và đạt được điểm số \textbf{73.96\%} (local) / \textbf{73.6\%} (public leaderboard),
+%         xác nhận tính tái lập của giải pháp.
+
+%   \item \textbf{Mở rộng edge tensor lên 8 kênh:}
+%         Đề xuất bổ sung 3 kênh hồi quy kernel đa băng thông ($h \in \{0.2, 0.5, 1.0\}$)
+%         và 3 kênh phần dư ANM (Additive Noise Model) đa băng thông,
+%         từ đó tăng khả năng mô hình nhận biết tính bất đối xứng nhân quả
+%         và phân biệt các lớp khó như Collider và Consequence of X.
+
+%   \item \textbf{Chiến lược tăng cường dữ liệu X/Y remap:}
+%         Đề xuất và cài đặt kỹ thuật tăng cường dữ liệu bằng cách
+%         coi mỗi cạnh có hướng $A \to B$ trong DAG thật như một cặp $(X', Y')$ mới,
+%         tái tính toán nhãn 8 lớp cho tất cả biến còn lại theo cặp mới,
+%         thu được $\sim\!11.2\times$ mẫu huấn luyện bổ sung.
+
+%   \item \textbf{Kết quả vượt trội so với giải pháp hạng nhất:}
+%         Mô hình đề xuất (v8b + XY augmentation) đạt \textbf{80.26\%} (local) /
+%         \textbf{80.22\%} (public leaderboard), vượt giải pháp hạng nhất
+%         của cuộc thi (\textbf{76.70\%}) với biên độ $+3.52\%$~\cite{olivetti2025adialab}.
+% \end{itemize}
+
+% % =====================================================================
+% \section{Cấu trúc khóa luận}
+% % =====================================================================
+
+% Phần còn lại của khóa luận được tổ chức như sau:
+
+% \begin{itemize}
+%   \item \textbf{Chương~\ref{chap:background} -- Cơ sở lý thuyết:}
+%         Trình bày lý thuyết đồ thị nhân quả, định nghĩa tám vai trò,
+%         đặc trưng edge tensor và các khối kiến trúc học sâu được sử dụng.
+
+%   \item \textbf{Chương~3 -- Phương pháp:}
+%         Mô tả chi tiết kiến trúc mô hình, quy trình xây dựng đặc trưng,
+%         hàm mất mát và chiến lược huấn luyện; đồng thời trình bày
+%         các cải tiến được đề xuất.
+
+%   \item \textbf{Chương~4 -- Thực nghiệm:}
+%         Trình bày thiết lập thực nghiệm, quy trình đánh giá,
+%         và kết quả so sánh giữa baseline và các cải tiến.
+
+%   \item \textbf{Chương~5 -- Kết luận:}
+%         Tổng kết kết quả đạt được, thảo luận hạn chế và định hướng nghiên cứu tiếp theo.
+% \end{itemize}
+
+\chapter{Introduction}
+\label{chap:intro}
+
+% =====================================================================
+\section{Problem Statement}
+% =====================================================================
+
+In data science and statistics, understanding \textit{causal relationships} between variables is far more important than merely measuring correlation. Correlation can arise from many sources -- hidden common causes (confounders), mediation, or pure statistical coincidence -- whereas causal relationships reflect the true underlying mechanism of a system~\cite{pearl2009causality}. Correctly identifying causal structure is foundational to many practical problems: experimental design, policy impact evaluation, financial risk analysis, and causal inference in medicine~\cite{hasan2023survey_arxiv}.
+
+The problem studied in this thesis is grounded in the \textbf{ADIA Lab Causal Discovery Challenge}~\cite{crunchdao_causal_2024, crunchdao_adia_docs}, a data science competition organized by ADIA Lab in collaboration with CrunchDAO. Specifically, the task is: given a dataset of $n = 1000$ observations over $p \in \{3,\ldots,10\}$ variables, where a causal edge $X \to Y$ always exists (with $X$ the treatment variable and $Y$ the outcome), \textbf{classify the role} of each remaining variable $K$ into one of \textbf{8 classes}: Confounder, Mediator, Collider, Independent, Cause of X, Consequence of X, Cause of Y, or Consequence of Y.
+
+This is a \textit{supervised multiclass classification} problem: given 47,000 training datasets, the model must learn statistical features and latent graph structure to distinguish among eight roles -- several of which share very similar statistical signatures and are inherently difficult to separate. Performance is measured by \textit{Multiclass Balanced Accuracy}~\cite{crunchdao_adia_docs}.
+
+% =====================================================================
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.75\linewidth]{figures/eight_roles_dag.png}
+    \caption{Illustration of the eight causal roles of variable $K$ with respect to the relationship $X \to Y$: each role corresponds to a distinct local DAG structure.}
+    \label{fig:eight_roles}
+\end{figure}
+
+\section{Motivation and Challenges}
+% =====================================================================
+
+Although many classical causal inference algorithms have been proposed (PC, LiNGAM, NOTEARS, etc.), these methods typically aim to recover the \textit{full DAG structure} and struggle when the goal is to precisely classify \textit{the role of each individual variable} from finite-sample observational data~\cite{spirtes2000causation}.
+
+The ADIA Lab problem poses several specific challenges. First, \textbf{distinguishing between similar class pairs}: for example, Confounder ($K \to X$, $K \to Y$) and Cause of X ($K \to X$, no $K \to Y$) both induce correlation between $K$ and $X$; similarly, Mediator ($X \to K \to Y$) and Consequence of X ($X \to K$, no effect on $Y$) both exhibit $X \to K$ -- the distinction lies in very subtle signals within the data. Second, \textbf{class imbalance}: the eight classes are not uniformly distributed, with Mediator and Collider having significantly fewer samples than others, causing models to neglect minority classes without appropriate handling strategies. Third, \textbf{permutation invariance}: the number of variables $p$ varies from 3 to 10, and variable naming order carries no semantic meaning -- the model must be invariant to variable permutation. Fourth, \textbf{nonlinear relationships}: the dependencies between variables are not necessarily linear, and simple statistics such as Pearson correlation are often insufficient to distinguish roles.
+
+Classical solutions provided by the competition organizers (PC algorithm, Random Forest, deep learning baseline) achieved only around \textbf{40\%} Balanced Accuracy~\cite{olivetti2025adialab} -- not far above random guessing at 12.5\% (1/8). The competition's first-place solution~\cite{adia_rank1_report} addressed these challenges through an end-to-end deep learning architecture: representing each variable pair as a \textit{3-channel edge tensor} (incorporating nonlinear kernel regression features), then using residual Conv1D and self-attention to learn graph-wide representations and classify each variable's role, achieving \textbf{76.70\%} Balanced Accuracy~\cite{olivetti2025adialab}. This thesis reimplements that solution, analyzes its components, and proposes extensions to an 8-channel feature representation combined with X/Y remap data augmentation, ultimately achieving \textbf{80.82\%} on the public leaderboard -- surpassing the first-place solution.
+
+% =====================================================================
+\section{Objectives and Scope}
+% =====================================================================
+
+This thesis has two primary objectives. First, to \textbf{reimplement and analyze} the first-place solution of the ADIA Lab Causal Discovery Challenge: understanding each architectural component, the training procedure, and the rationale behind each design choice. This objective produces a solid, reproducible baseline. Second, to \textbf{propose improvements} aimed at increasing Balanced Accuracy, particularly on difficult classes (Mediator, Collider), through additional feature channels, architectural refinements, and training strategies.
+
+\textbf{Scope:} The thesis focuses on i.i.d.\ observational data following the ADIA Lab setup (not time-series with autocorrelation). The model is implemented and evaluated on the CrunchDAO platform using the official Multiclass Balanced Accuracy metric.
+
+% =====================================================================
+\section{Contributions}
+% =====================================================================
+
+The specific contributions of this thesis are as follows.
+
+\textbf{Reimplementation and detailed analysis of the first-place solution:} The complete pipeline is reimplemented -- from edge tensor construction (3 channels, kernel regression) to the residual Conv1D + self-attention + dual-head loss architecture -- achieving \textbf{73.96\%} (local) / \textbf{73.61\%} (public leaderboard), confirming the reproducibility of the original solution.
+
+\textbf{Extension of edge tensors to 8 channels:} Three multi-bandwidth kernel regression channels ($h \in \{0.2, 0.5, 1.0\}$) and three multi-bandwidth ANM (Additive Noise Model) residual channels are added, enhancing the model's ability to detect causal asymmetry and distinguish difficult classes such as Collider and Consequence of X.
+
+\textbf{X/Y remap data augmentation strategy:} A data augmentation technique is proposed and implemented by treating each directed edge $A \to B$ in the ground-truth DAG as a new treatment-outcome pair $(X', Y')$, recomputing 8-class labels for all remaining variables relative to the new pair, yielding approximately $11.2\times$ additional training samples.
+
+\textbf{Structural attention bias:} A topology-aware attention bias is introduced into the self-attention layers, encoding prior knowledge about causal relationships between edge pairs (chain, fork, collider) directly into the architecture with minimal additional parameters.
+
+\textbf{Results surpassing the first-place solution:} The best proposed model (v11 + XY augmentation) achieves \textbf{81.14\%} (local) / \textbf{80.82\%} (public leaderboard), surpassing the competition's first-place solution (\textbf{76.70\%}) by a margin of $+4.12\%$~\cite{olivetti2025adialab}.
+
+% =====================================================================
+\section{Thesis Structure}
+% =====================================================================
+
+The remainder of the thesis is organized as follows.
+
+\textbf{Chapter~\ref{chap:background} -- Background:} Presents causal graph theory, definitions of the eight roles, edge tensor features, and the core deep learning architectural components used.
+
+\textbf{Chapter~3 -- Methodology:} Describes in detail the model architecture, feature construction pipeline, loss function, and training strategy, along with the proposed improvements.
+
+\textbf{Chapter~4 -- Experiments:} Presents the experimental setup, evaluation procedure, and comparative results between the baseline and proposed improvements.
+
+\textbf{Chapter~5 -- Results and Analysis:} Provides detailed analysis of all experimental results, ablation studies, error analysis, and key lessons learned.
+
+\textbf{Chapter~6 -- Conclusion:} Summarizes the results achieved, discusses limitations, and outlines directions for future work.

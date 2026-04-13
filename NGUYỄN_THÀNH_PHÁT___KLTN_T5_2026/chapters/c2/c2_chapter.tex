@@ -1,0 +1,530 @@
+% \chapter{Cơ sở lý thuyết}
+
+% % Trong chương này cần trình bày được các kiến thức cơ sở là nền tảng cần thiết để người đọc hiểu đầy đủ các phương pháp được trình bày ở các chương sau. Chương này thường bao gồm các nội dung sau:
+% % \begin{itemize}
+% %     \item Các khái niệm, định nghĩa cơ bản
+% %     \item Các mô hình, phương pháp, thuật toán nền tảng
+% %     \item Các công cụ, công nghệ, nền tảng liên quan
+% %     \item Các giải pháp/nghiên cứu liên quan
+    
+% % \end{itemize}
+
+% % Lưu ý:
+
+% % \begin{itemize}
+% %     \item Cần tham chiếu đến các tài liệu tham khảo \textbf{đúng} và \textbf{đủ}. Thiếu tham chiếu đến tài liệu tham khảo coi như sao chép.
+% %     \item \textbf{Không} chép lại nội dung từ các tài liệu tham khảo, SV cần diễn đạt lại các nội dung tương ứng phù hợp với bài toán và phạm vi của KLTN
+% %     \item Đối với các KLTN xây dựng hệ thống, nội dung của chương này chỉ tập trung trình bày các công cụ/công nghệ sử dụng (không đi sâu lý thuyết/thuật toán) thì có thể đổi tên tiêu đề thành ``Nền tảng và công nghệ sử dụng''
+% % \end{itemize}
+
+% Chương này trình bày các kiến thức nền tảng về lý thuyết nhân quả, mô hình đồ thị và các thuật toán suy luận cốt lõi. Đây là cơ sở để luận văn này phát triển và đánh giá các giải pháp kỹ thuật trong những chương tiếp theo.
+
+% \chapter{Cơ sở lý thuyết và bài toán phân loại vai trò nhân quả}
+% \label{chap:background}
+
+% Chương này trình bày các kiến thức nền tảng trực tiếp liên quan đến bài toán và giải pháp được phát triển
+% trong luận văn: (1) lý thuyết đồ thị nhân quả và định nghĩa tám vai trò biến,
+% (2) đặc trưng thống kê dùng để biểu diễn dữ liệu quan sát dưới dạng edge tensor,
+% (3) các khối kiến trúc học sâu cốt lõi (Conv1D residual, self-attention),
+% và (4) tổng quan các hướng tiếp cận hiện có trên bài toán ADIA Lab Causal Discovery Challenge.
+
+% % =====================================================================
+% \section{Lý thuyết đồ thị nhân quả}
+% % =====================================================================
+
+% \subsection{Đồ thị có hướng không chu trình (DAG) và mô hình nhân quả cấu trúc}
+
+% Quan hệ nhân quả giữa các biến ngẫu nhiên được biểu diễn bằng
+% \textit{đồ thị có hướng không chu trình} (Directed Acyclic Graph -- DAG) $G=(V,E)$,
+% trong đó mỗi cạnh $X_i \to X_j$ thể hiện tác động nhân quả trực tiếp từ $X_i$ đến $X_j$.
+% Kết hợp với các phương trình cấu trúc
+% \begin{equation}
+%   X_i := f_i\!\left(\mathrm{Pa}(X_i),\, U_i\right),
+%   \label{eq:scm}
+% \end{equation}
+% ta có \textit{Mô hình nhân quả cấu trúc} (Structural Causal Model -- SCM)~\cite{pearl2009causality},
+% trong đó $\mathrm{Pa}(X_i)$ là tập biến cha trực tiếp của $X_i$ và $U_i$ là nhiễu ngoại sinh độc lập.
+% SCM phân biệt rõ phân phối quan sát $P(V)$ với phân phối can thiệp $P(V \mid do(X=x))$,
+% đây là nền tảng để định nghĩa ý nghĩa nhân quả của từng quan hệ trong đồ thị~\cite{pearl2009causality}.
+
+% \subsection{Tiêu chuẩn d-separation và ba motif cơ bản}
+
+% Tính độc lập có điều kiện trên DAG được suy ra qua tiêu chuẩn \textit{d-separation}~\cite{geiger2013dseparation}:
+% tập $Z$ d-tách $X$ và $Y$ nếu mọi đường đi (path) giữa $X$ và $Y$ đều bị chặn bởi $Z$.
+% Dưới giả định Faithfulness (mọi độc lập thống kê phản ánh đúng tách biệt đồ thị~\cite{spirtes2000causation}),
+% ta có thể suy ngược từ dữ liệu sang cấu trúc đồ thị.
+
+% Ba motif nền tảng trực tiếp liên quan đến cách phân loại vai trò biến $K$:
+
+% \begin{itemize}
+%   \item \textbf{Chain:} $X \to K \to Y$. Điều kiện hóa $K$ chặn đường đi: $X \perp Y \mid K$.
+%         Đây là cấu trúc của vai trò \textbf{Mediator}.
+%   \item \textbf{Fork (Confounder):} $X \leftarrow K \to Y$. Điều kiện hóa $K$ chặn đường đi: $X \perp Y \mid K$.
+%         Đây là cấu trúc của vai trò \textbf{Confounder}.
+%   \item \textbf{Collider:} $X \to K \leftarrow Y$. Không điều kiện hóa: $X \perp Y$;
+%         khi điều kiện hóa $K$: $X \not\perp Y \mid K$ (collider bias).
+%         Đây là cấu trúc của vai trò \textbf{Collider}.
+% \end{itemize}
+
+% Lưu ý rằng Chain và Fork tạo ra cùng dấu hiệu thống kê ($X \perp Y \mid K$), trong khi Collider thì ngược lại.
+% Điều này dẫn đến sự khó khăn trong phân biệt Mediator với Confounder khi chỉ dùng kiểm định độc lập có điều kiện đơn thuần.
+
+% % =====================================================================
+% \begin{figure}[h]
+%     \centering
+%     \includegraphics[width=0.7\linewidth]{figures/dsep_motifs.png}
+%     \caption{Ba motif d-separation cơ bản: Chain ($X \to K \to Y$),
+%              Fork ($X \leftarrow K \to Y$), và Collider ($X \to K \leftarrow Y$).
+%              Mũi tên thể hiện hướng nhân quả; $\perp$ và $\not\perp$ thể hiện
+%              độc lập và phụ thuộc có điều kiện tương ứng.}
+%     \label{fig:dsep_motifs}
+% \end{figure}
+
+% \section{Bài toán phân loại tám vai trò nhân quả}
+% \label{sec:8roles}
+% % =====================================================================
+
+% \subsection{Thiết lập bài toán từ ADIA Lab Causal Discovery Challenge}
+
+% ADIA Lab Causal Discovery Challenge~\cite{crunchdao_adia_docs, crunchdao_competition} đặt ra bài toán sau:
+% cho một tập dữ liệu gồm $n = 1000$ quan sát trên $p \in \{3, \ldots, 10\}$ biến,
+% trong đó luôn tồn tại hai biến đặc biệt $X$ (treatment) và $Y$ (outcome) với giả định có cạnh nhân quả $X \to Y$,
+% hãy phân loại vai trò của từng biến $K \neq X,\, K \neq Y$ đối với quan hệ $X \to Y$.
+
+% Đây là bài toán \textbf{phân loại đa lớp} (multiclass classification):
+% với mỗi bộ $(X, Y, K, \mathcal{D})$, mô hình dự đoán một trong 8 nhãn.
+% Tổng cộng có 47,000 datasets trong tập huấn luyện.
+% Độ đo đánh giá chính thức là \textit{Multiclass Balanced Accuracy}:
+% \begin{equation}
+%   \mathrm{BA} = \frac{1}{C}\sum_{c=1}^{C} \frac{\mathrm{TP}_c}{\mathrm{TP}_c + \mathrm{FN}_c},
+%   \label{eq:balanced_acc}
+% \end{equation}
+% với $C = 8$ lớp. Độ đo này xử lý mất cân bằng lớp tự nhiên trong dữ liệu -- mỗi lớp được tính trọng số bằng nhau
+% bất kể số lượng mẫu~\cite{crunchdao_adia_docs, olivetti2025adialab}.
+% Một chiến lược đoán ngẫu nhiên sẽ đạt 12.5\% (1/8), và các baseline do ban tổ chức cung cấp
+% đạt khoảng 40\%~\cite{olivetti2025adialab}.
+
+% \subsection{Định nghĩa tám vai trò của biến \texorpdfstring{$K$}{K}}
+% \label{subsec:8classes}
+
+% Tám nhãn được định nghĩa theo cấu trúc nhân quả của $K$ trong DAG chứa $X$, $Y$, $K$
+% (cạnh $X \to Y$ luôn tồn tại theo giả định bài toán):
+
+% \begin{enumerate}
+%   \item \textbf{Confounder:} $K \to X$ và $K \to Y$. Biến $K$ là nguyên nhân chung,
+%         tạo tương quan giả tạo giữa $X$ và $Y$ nếu không kiểm soát $K$.
+%   \item \textbf{Mediator:} $X \to K \to Y$ (đường trung gian song song với cạnh trực tiếp $X \to Y$).
+%         Biến $K$ truyền dẫn một phần hiệu ứng nhân quả từ $X$ đến $Y$.
+%   \item \textbf{Collider:} $X \to K \leftarrow Y$. Cả $X$ lẫn $Y$ đều là nguyên nhân của $K$.
+%         Điều kiện hóa $K$ tạo ra phụ thuộc giả giữa $X$ và $Y$.
+%   \item \textbf{Independent:} $K$ không có cạnh nhân quả nào đến hoặc từ $X$, $Y$.
+%         $K$ độc lập thống kê với cả hai biến.
+%   \item \textbf{Cause of X:} $K \to X$, nhưng không có đường nối trực tiếp giữa $K$ và $Y$
+%         ngoài đường qua $X$.
+%   \item \textbf{Consequence of X:} $X \to K$, và $K$ không ảnh hưởng đến $Y$.
+%   \item \textbf{Cause of Y:} $K \to Y$, nhưng không có đường nối trực tiếp giữa $K$ và $X$
+%         ngoài đường qua $Y$.
+%   \item \textbf{Consequence of Y:} $Y \to K$, và $K$ không ảnh hưởng đến $X$.
+% \end{enumerate}
+
+% \subsection{Khó khăn phân biệt giữa các lớp}
+
+% Một số cặp nhãn chia sẻ dấu hiệu thống kê tương tự, gây khó khăn cho phân loại:
+
+% \begin{itemize}
+%   \item \textbf{Confounder vs.\ Cause of X:} Cả hai đều có $K \to X$ nên tạo ra tương quan giữa $K$ và $X$.
+%         Sự khác biệt nằm ở việc $K$ có cạnh đến $Y$ hay không.
+%   \item \textbf{Mediator vs.\ Consequence of X:} Cả hai đều có $X \to K$.
+%         Sự khác biệt nằm ở việc $K$ có ảnh hưởng tiếp theo đến $Y$ hay không.
+%   \item \textbf{Mediator vs.\ Confounder:} Như đã phân tích ở ~\ref{sec:8roles},
+%         cả hai đều tạo ra $X \perp Y \mid K$ theo d-separation,
+%         nhưng cơ chế nhân quả hoàn toàn khác nhau.
+% \end{itemize}
+
+% Theo phân tích hậu kỳ của ban tổ chức~\cite{olivetti2025adialab},
+% ngay cả giải pháp hạng nhất cũng chỉ đạt 65.67\% trên lớp Mediator --
+% thấp nhất trong tám lớp -- trong khi đạt 86.18\% trên lớp Independent.
+% Supervised baseline của ban tổ chức chỉ đạt 13.89\% trên Mediator và 18.60\% trên Confounder,
+% cho thấy đây là hai lớp thách thức nhất~\cite{olivetti2025adialab}.
+% Trong thực nghiệm tái hiện của luận văn, hai lớp khó nhất là Mediator ($\sim\!56\%$)
+% và Collider ($\sim\!63\%$).~\cite{adia_rank1_report}
+
+% % =====================================================================
+% \begin{figure}[h]
+%     \centering
+%     \includegraphics[width=0.85\linewidth]{figures/eight_roles_summary.png}
+%     \caption{Tóm tắt tám vai trò nhân quả và cấu trúc DAG tương ứng.
+%              Các cặp lớp được đánh dấu màu có biểu hiện thống kê tương tự nhau,
+%              gây khó khăn cho phân loại.}
+%     \label{fig:eight_roles_summary}
+% \end{figure}
+
+% \section{Biểu diễn dữ liệu dạng edge tensor}
+% \label{sec:edge_tensor}
+% % =====================================================================
+
+% \subsection{Động cơ tiếp cận theo cạnh}
+
+% Thay vì xử lý ma trận dữ liệu thô $(n \times p)$,
+% giải pháp hạng nhất~\cite{adia_rank1_report} biểu diễn mỗi \textit{cặp biến có thứ tự} $(u, v)$
+% như một \textbf{edge tensor} đa kênh có độ dài $n$.
+% Cách tiếp cận này có hai lợi thế:
+% (1) kiến trúc xử lý trở nên \textit{bất biến với hoán vị biến} (permutation-equivariant);
+% (2) thông tin theo từng hướng $(u \to v)$ và $(v \to u)$ được mã hóa riêng biệt,
+% giúp mô hình học được tính bất đối xứng nhân quả.
+
+% Trong luận văn, edge tensor được mở rộng từ 3 kênh (giải pháp gốc) lên \textbf{8 kênh},
+% bổ sung hồi quy kernel đa băng thông và phần dư ANM đa băng thông.
+
+% \subsection{Tám kênh của edge tensor}
+% \label{subsec:8channels}
+
+% Với cặp biến $(u, v)$ và hoán vị $\sigma$ sắp xếp $u$ tăng dần,
+% edge tensor 8 kênh được xây dựng như sau:
+
+% \paragraph{Kênh 1 -- $u$ sắp xếp tăng dần.}
+% Chuỗi $\mathbf{c}_1 = (u_{\sigma(1)}, \ldots, u_{\sigma(n)})$ bảo toàn phân phối biên của $u$.
+
+% \paragraph{Kênh 2 -- $v$ sắp xếp theo rank của $u$.}
+% Chuỗi $\mathbf{c}_2 = (v_{\sigma(1)}, \ldots, v_{\sigma(n)})$ mã hóa quan hệ đơn điệu
+% và tương quan thứ hạng giữa $u$ và $v$.
+
+% \paragraph{Kênh 3--5 -- Hồi quy kernel đa băng thông.}
+% Tại mỗi điểm $u_{\sigma(i)}$, ước lượng Nadaraya--Watson~\cite{nadaraya1964, watson1964}:
+% \begin{equation}
+%   \hat{m}_h(u_{\sigma(i)}) =
+%   \frac{\displaystyle\sum_{j=1}^{n} \exp\!\left(-\frac{(u_{\sigma(i)} - u_j)^2}{2h^2}\right) v_j}
+%        {\displaystyle\sum_{j=1}^{n} \exp\!\left(-\frac{(u_{\sigma(i)} - u_j)^2}{2h^2}\right)},
+%   \label{eq:nadaraya}
+% \end{equation}
+% được tính với ba giá trị băng thông $h \in \{0.2,\, 0.5,\, 1.0\}$,
+% tạo ra ba kênh $\mathbf{c}_3, \mathbf{c}_4, \mathbf{c}_5$.
+% Mỗi băng thông nắm bắt mức độ trơn khác nhau của hàm hồi quy --
+% $h = 0.2$ nhạy cảm với cấu trúc cục bộ, $h = 1.0$ phản ánh xu hướng toàn cục.
+% Việc dùng nhiều băng thông giúp mô hình không phụ thuộc vào một lựa chọn $h$ cố định.
+
+% \paragraph{Kênh 6--8 -- Phần dư ANM đa băng thông.}
+% Mô hình nhiễu cộng (Additive Noise Model -- ANM)~\cite{shimizu2006lingam} giả định
+% $V = f(U) + \varepsilon$ với $\varepsilon \perp U$.
+% Phần dư hồi quy theo hướng $u \to v$ tại điểm $u_{\sigma(i)}$ là:
+% \begin{equation}
+%   r_h(u_{\sigma(i)}) = v_{\sigma(i)} - \hat{m}_h(u_{\sigma(i)}),
+%   \label{eq:anm_resid}
+% \end{equation}
+% được tính với cùng ba băng thông $h \in \{0.2,\, 0.5,\, 1.0\}$,
+% tạo ra ba kênh $\mathbf{c}_6, \mathbf{c}_7, \mathbf{c}_8$.
+
+% Tính bất đối xứng nhân quả của phần dư ANM là lý do kênh này mang thông tin:
+% trong mô hình $U \to V$ với nhiễu phi Gaussian, phần dư $V - \hat{m}(U)$
+% gần độc lập với $U$ hơn so với chiều ngược lại $U - \hat{m}(V)$~\cite{shimizu2006lingam}.
+% Mô hình Conv1D có thể học được dấu hiệu này từ hình dạng phân phối của $\mathbf{c}_{6..8}$.
+% Thực nghiệm cho thấy kênh ANM cải thiện rõ rệt accuracy trên lớp Collider (+6.1\%)
+% và Consequence of X (+5.0\%) so với baseline 3 kênh.
+
+% % =====================================================================
+% \begin{figure}[h]
+%     \centering
+%     \includegraphics[width=0.85\linewidth]{figures/edge_tensor_illustration.png}
+%     \caption{Minh họa xây dựng edge tensor cho cặp biến $(u,v)$:
+%              ba kênh biểu diễn lần lượt phân phối biên của $u$,
+%              quan hệ thứ hạng $u$--$v$, và hồi quy kernel phi tuyến.}
+%     \label{fig:edge_tensor_ch2}
+% \end{figure}
+
+% \section{Các khối kiến trúc học sâu}
+% \label{sec:deep_arch}
+% % =====================================================================
+
+% \subsection{Mạng tích chập 1D (Conv1D) và khối residual}
+
+% Mạng tích chập 1D áp dụng các bộ lọc học được trên chuỗi 1D,
+% phù hợp để trích xuất đặc trưng cục bộ từ edge tensor (mỗi cạnh là chuỗi độ dài $n = 1000$).
+% Với bộ lọc có độ rộng $k$, một lớp Conv1D tính:
+% \begin{equation}
+%   y_t = \sum_{j=0}^{k-1} w_j \cdot x_{t+j} + b,
+%   \label{eq:conv1d}
+% \end{equation}
+% thu được biểu diễn đặc trưng tại mỗi vị trí trên chuỗi đầu vào.
+
+% Để tránh vanishing gradient khi tăng chiều sâu mạng, ta dùng \textit{kết nối tắt} (skip/residual connection)~\cite{he2016resnet}:
+% \begin{equation}
+%   \mathbf{y} = \mathcal{F}(\mathbf{x};\, \{W_i\}) + \mathbf{x},
+%   \label{eq:residual}
+% \end{equation}
+% trong đó $\mathcal{F}$ là ánh xạ cần học và $\mathbf{x}$ là đầu vào đi tắt.
+% Kết hợp với \textit{Group Normalization}~\cite{wu2018groupnorm}
+% (thay vì Batch Normalization để ổn định với batch size nhỏ)
+% và hàm kích hoạt GELU~\cite{hendrycks2016gelu}, mỗi khối residual trong mô hình có dạng:
+% \begin{equation}
+%   \mathbf{y} = \mathbf{x} + \mathrm{Conv1D}\!\left(\mathrm{GELU}\!\left(\mathrm{GroupNorm}(\mathbf{x})\right)\right).
+%   \label{eq:residual_block}
+% \end{equation}
+
+% \subsection{Cơ chế self-attention}
+% \label{subsec:selfattention}
+
+% Sau khi mỗi edge tensor được xử lý qua các khối Conv1D và rút gọn về một vector biểu diễn
+% $\mathbf{e}_{uv} \in \mathbb{R}^d$ qua Global Average Pooling,
+% cần tổng hợp thông tin từ tất cả các cạnh trong đồ thị để suy luận về vai trò từng biến.
+% Cơ chế \textit{self-attention}~\cite{vaswani2017attention} cho phép mỗi phần tử trong chuỗi
+% truy vấn thông tin từ các phần tử khác:
+% \begin{equation}
+%   \mathrm{Attention}(Q, K, V) = \mathrm{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V,
+%   \label{eq:attention}
+% \end{equation}
+% trong đó $Q = \mathbf{X} W^Q$, $K = \mathbf{X} W^K$, $V = \mathbf{X} W^V$ là các phép chiếu tuyến tính.
+
+% \textit{Multi-head attention}~\cite{vaswani2017attention} chạy $H$ đầu song song:
+% \begin{equation}
+%   \mathrm{MultiHead}(Q,K,V) = \mathrm{Concat}(\mathrm{head}_1,\ldots,\mathrm{head}_H)\,W^O.
+%   \label{eq:multihead}
+% \end{equation}
+% Hai lớp multi-head self-attention được đặt sau bước pooling để tổng hợp biểu diễn
+% của tất cả các cạnh, cho phép mô hình so sánh thông tin toàn đồ thị và chuyển từ
+% biểu diễn edge-level sang node-level.
+
+% \subsection{Hàm mất mát và chiến lược huấn luyện}
+% \label{subsec:training}
+
+% Mô hình dùng hai đầu ra với hai hàm mất mát:
+% \begin{itemize}
+%   \item \textbf{Node head} (8-class): Hàm mất mát chính, Cross-Entropy (CE) có trọng số nghịch đảo tần suất lớp.
+%   \item \textbf{Edge head} (binary -- có/không cạnh nhân quả): Auxiliary loss, chỉ dùng trong quá trình huấn luyện.
+% \end{itemize}
+
+% Hàm mất mát tổng hợp:
+% \begin{equation}
+%   \mathcal{L} = \mathcal{L}_{\mathrm{node}} + \lambda \cdot \mathcal{L}_{\mathrm{edge}},
+%   \label{eq:loss}
+% \end{equation}
+% với $\lambda$ là siêu tham số cân bằng. Trọng số mỗi lớp trong CE được đặt là nghịch đảo tần suất lớp đó
+% trong tập huấn luyện, xử lý mất cân bằng lớp.
+
+% Thuật toán tối ưu: \textit{AdamW}~\cite{loshchilov2019adamw} với \textit{cosine annealing} schedule~\cite{loshchilov2017sgdr}.
+
+% % =====================================================================
+% \section{Các giải pháp hiện có trên bài toán ADIA Lab}
+% \label{sec:related_work}
+% % =====================================================================
+
+% \subsection{Giải pháp hạng nhất: GNN end-to-end}
+% \label{subsec:rank1}
+
+% Giải pháp hạng nhất~\cite{adia_rank1_report} là mô hình học sâu end-to-end với kiến trúc tóm tắt:
+% \textit{Edge tensor construction} (3 kênh) $\to$ \textit{Stem Conv1D} (3$\to$64 kênh) $\to$
+% 5 \textit{khối Residual Conv1D} $\to$ \textit{Global Average Pooling} $\to$
+% \textit{Kết hợp edge-type embedding} $\to$ 2 lớp \textit{Self-Attention} $\to$
+% \textit{Node head} (8-class) + \textit{Edge head} (binary, auxiliary).
+% Mô hình có $\sim\!188$K tham số và đạt \textbf{76.7\%} Balanced Accuracy trên public leaderboard.
+
+% \subsection{Giải pháp hạng 4--5: Feature engineering + Gradient Boosting}
+
+% Giải pháp hạng 4~\cite{adia_rank4_medium} và hạng 5~\cite{adia_rank5_medium} theo hướng
+% feature engineering kết hợp gradient boosting:
+% trích xuất đặc trưng thống kê (Pearson/Spearman correlation, partial correlation,
+% conditional mutual information, HSIC, phần dư hồi quy)
+% cùng tín hiệu từ các thuật toán causal discovery cổ điển (LiNGAM~\cite{shimizu2006lingam}, GES),
+% sau đó dùng LightGBM/XGBoost ensemble để phân loại 8 nhãn.
+% Ưu điểm: dễ giải thích, không cần GPU;
+% nhược điểm: phụ thuộc feature engineering thủ công và không học biểu diễn end-to-end.
+
+% \subsection{Vị trí đóng góp của luận văn}
+
+% Luận văn này tái hiện và phân tích chi tiết giải pháp hạng nhất,
+% sau đó đề xuất các cải tiến nhằm nâng cao Balanced Accuracy -- đặc biệt trên các lớp khó
+% Mediator ($\sim\!56\%$) và Collider ($\sim\!63\%$) trong baseline reimplementation.
+% Điểm baseline thu được trong luận văn là \textbf{73.96\%} local / \textbf{73.6\%} public leaderboard.
+% Các đóng góp kỹ thuật cụ thể được trình bày trong Chương~\ref{chap:method}.
+
+\chapter{Background and Related Work}
+\label{chap:background}
+
+This chapter presents the theoretical foundations directly relevant to the problem and solution developed in the thesis: (1) causal graph theory and the definition of the eight variable roles, (2) statistical features used to represent observational data as edge tensors, (3) core deep learning architectural components (residual Conv1D, self-attention), and (4) an overview of existing approaches on the ADIA Lab Causal Discovery Challenge.
+
+% =====================================================================
+\section{Causal Graph Theory}
+% =====================================================================
+
+\subsection{Directed Acyclic Graphs and Structural Causal Models}
+
+Causal relationships between random variables are represented using a \textit{Directed Acyclic Graph} (DAG) $G=(V,E)$, where each edge $X_i \to X_j$ denotes a direct causal effect from $X_i$ to $X_j$. Combined with structural equations
+\begin{equation}
+  X_i := f_i\!\left(\mathrm{Pa}(X_i),\, U_i\right),
+  \label{eq:scm}
+\end{equation}
+this forms a \textit{Structural Causal Model} (SCM)~\cite{pearl2009causality}, where $\mathrm{Pa}(X_i)$ is the set of direct parents of $X_i$ and $U_i$ is an independent exogenous noise term. SCMs clearly distinguish between the observational distribution $P(V)$ and the interventional distribution $P(V \mid do(X=x))$, which is the foundation for defining the causal meaning of each relationship in the graph~\cite{pearl2009causality}.
+
+\subsection{d-Separation and the Three Fundamental Motifs}
+
+Conditional independence on a DAG is derived via the \textit{d-separation} criterion~\cite{geiger2013dseparation}: a set $Z$ d-separates $X$ and $Y$ if every path between $X$ and $Y$ is blocked by $Z$. Under the Faithfulness assumption (every statistical independence reflects a corresponding graphical separation~\cite{spirtes2000causation}), one can reason from data back to graph structure.
+
+Three fundamental motifs are directly relevant to classifying the role of variable $K$. \textbf{Chain:} $X \to K \to Y$. Conditioning on $K$ blocks the path: $X \perp Y \mid K$. This is the structure of the \textbf{Mediator} role. \textbf{Fork (Confounder):} $X \leftarrow K \to Y$. Conditioning on $K$ blocks the path: $X \perp Y \mid K$. This is the structure of the \textbf{Confounder} role. \textbf{Collider:} $X \to K \leftarrow Y$. Marginally: $X \perp Y$; but conditioning on $K$ induces dependence: $X \not\perp Y \mid K$ (collider bias). This is the structure of the \textbf{Collider} role.
+
+Note that Chain and Fork produce the same marginal statistical signature ($X \perp Y \mid K$), while Collider produces the opposite. This leads to fundamental difficulty in distinguishing Mediator from Confounder using conditional independence tests alone.
+
+% =====================================================================
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.7\linewidth]{figures/dsep_motifs.png}
+    \caption{The three fundamental d-separation motifs: Chain ($X \to K \to Y$), Fork ($X \leftarrow K \to Y$), and Collider ($X \to K \leftarrow Y$). Arrows denote causal direction; $\perp$ and $\not\perp$ denote conditional independence and dependence respectively.}
+    \label{fig:dsep_motifs}
+\end{figure}
+
+\section{The Eight-Class Causal Role Classification Problem}
+\label{sec:8roles}
+% =====================================================================
+
+\subsection{Problem Setup from the ADIA Lab Causal Discovery Challenge}
+
+The ADIA Lab Causal Discovery Challenge~\cite{crunchdao_adia_docs, crunchdao_competition} poses the following problem: given a dataset of $n = 1000$ observations over $p \in \{3, \ldots, 10\}$ variables, where two special variables $X$ (treatment) and $Y$ (outcome) are identified and the causal edge $X \to Y$ is assumed to exist, classify the role of each variable $K \neq X,\, K \neq Y$ with respect to the relationship $X \to Y$.
+
+This is a \textbf{multiclass classification} problem: for each tuple $(X, Y, K, \mathcal{D})$, the model predicts one of 8 labels. There are 47,000 training datasets in total. The official evaluation metric is \textit{Multiclass Balanced Accuracy}:
+\begin{equation}
+  \mathrm{BA} = \frac{1}{C}\sum_{c=1}^{C} \frac{\mathrm{TP}_c}{\mathrm{TP}_c + \mathrm{FN}_c},
+  \label{eq:balanced_acc}
+\end{equation}
+with $C = 8$ classes. This metric handles class imbalance naturally -- each class is weighted equally regardless of sample count~\cite{crunchdao_adia_docs, olivetti2025adialab}. A random guessing strategy achieves 12.5\% (1/8), and the organizer-provided baselines reach approximately 40\%~\cite{olivetti2025adialab}.
+
+\subsection{Definition of the Eight Variable Roles}
+\label{subsec:8classes}
+
+The eight labels are defined according to the causal structure of $K$ in the DAG containing $X$, $Y$, and $K$ (with the edge $X \to Y$ always assumed present):
+
+\begin{enumerate}
+  \item \textbf{Confounder:} $K \to X$ and $K \to Y$. Variable $K$ is a common cause, inducing spurious correlation between $X$ and $Y$ if $K$ is not controlled for.
+  \item \textbf{Mediator:} $X \to K \to Y$ (a mediation pathway parallel to the direct edge $X \to Y$). Variable $K$ transmits part of the causal effect from $X$ to $Y$.
+  \item \textbf{Collider:} $X \to K \leftarrow Y$. Both $X$ and $Y$ are causes of $K$. Conditioning on $K$ induces spurious dependence between $X$ and $Y$.
+  \item \textbf{Independent:} $K$ has no causal edges to or from $X$ or $Y$. $K$ is statistically independent of both.
+  \item \textbf{Cause of X:} $K \to X$, but there is no direct path between $K$ and $Y$ other than through $X$.
+  \item \textbf{Consequence of X:} $X \to K$, and $K$ has no effect on $Y$.
+  \item \textbf{Cause of Y:} $K \to Y$, but there is no direct path between $K$ and $X$ other than through $Y$.
+  \item \textbf{Consequence of Y:} $Y \to K$, and $K$ has no effect on $X$.
+\end{enumerate}
+
+\subsection{Challenges in Distinguishing Between Classes}
+
+Several pairs of labels share similar statistical signatures, making classification difficult. \textbf{Confounder vs.\ Cause of X:} Both have $K \to X$, creating correlation between $K$ and $X$. The difference lies in whether $K$ has an edge to $Y$. \textbf{Mediator vs.\ Consequence of X:} Both have $X \to K$. The difference lies in whether $K$ subsequently affects $Y$. \textbf{Mediator vs.\ Confounder:} As analyzed above, both produce $X \perp Y \mid K$ under d-separation, but through entirely different causal mechanisms.
+
+According to the post-competition analysis by the organizers~\cite{olivetti2025adialab}, even the first-place solution achieved only 65.67\% on the Mediator class -- the lowest among all eight classes -- while achieving 86.18\% on Independent. The organizers' supervised baseline reached only 13.89\% on Mediator and 18.60\% on Confounder, confirming these as the two most challenging classes~\cite{olivetti2025adialab}. In the reimplementation results of this thesis, the two hardest classes are Mediator ($\sim\!56\%$) and Collider ($\sim\!63\%$).
+
+% =====================================================================
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.85\linewidth]{figures/eight_roles_summary.png}
+    \caption{Summary of the eight causal roles and their corresponding DAG structures. Color-coded class pairs share similar statistical signatures, making classification harder.}
+    \label{fig:eight_roles_summary}
+\end{figure}
+
+\section{Edge Tensor Representation}
+\label{sec:edge_tensor}
+% =====================================================================
+
+\subsection{Motivation for the Edge-Based Approach}
+
+Rather than processing a raw data matrix $(n \times p)$, the first-place solution~\cite{adia_rank1_report} represents each \textit{ordered variable pair} $(u, v)$ as a multi-channel \textbf{edge tensor} of length $n$. This approach has two advantages: (1) the architecture becomes \textit{permutation-equivariant} with respect to variable ordering; and (2) directional information for $(u \to v)$ and $(v \to u)$ is encoded separately, allowing the model to learn causal asymmetry.
+
+In this thesis, the edge tensor is extended from 3 channels (original solution) to \textbf{8 channels}, adding multi-bandwidth kernel regression and multi-bandwidth ANM residual channels.
+
+\subsection{The Eight Channels of the Edge Tensor}
+\label{subsec:8channels}
+
+Given variable pair $(u, v)$ and permutation $\sigma$ that sorts $u$ in ascending order, the 8-channel edge tensor is constructed as follows.
+
+\paragraph{Channel 1 -- Sorted $u$.} The sequence $\mathbf{c}_1 = (u_{\sigma(1)}, \ldots, u_{\sigma(n)})$ preserves the marginal distribution of $u$.
+
+\paragraph{Channel 2 -- $v$ sorted by rank of $u$.} The sequence $\mathbf{c}_2 = (v_{\sigma(1)}, \ldots, v_{\sigma(n)})$ encodes the monotonic relationship and rank correlation between $u$ and $v$.
+
+\paragraph{Channels 3--5 -- Multi-bandwidth kernel regression.} At each point $u_{\sigma(i)}$, the Nadaraya--Watson estimator~\cite{nadaraya1964, watson1964}:
+\begin{equation}
+  \hat{m}_h(u_{\sigma(i)}) =
+  \frac{\displaystyle\sum_{j=1}^{n} \exp\!\left(-\frac{(u_{\sigma(i)} - u_j)^2}{2h^2}\right) v_j}
+       {\displaystyle\sum_{j=1}^{n} \exp\!\left(-\frac{(u_{\sigma(i)} - u_j)^2}{2h^2}\right)},
+  \label{eq:nadaraya}
+\end{equation}
+is computed with three bandwidths $h \in \{0.2,\, 0.5,\, 1.0\}$, producing channels $\mathbf{c}_3, \mathbf{c}_4, \mathbf{c}_5$. Each bandwidth captures a different smoothness scale of the regression function -- $h = 0.2$ is sensitive to local structure while $h = 1.0$ reflects global trends. Using multiple bandwidths prevents the model from depending on any single fixed choice of $h$.
+
+\paragraph{Channels 6--8 -- Multi-bandwidth ANM residuals.} The Additive Noise Model (ANM)~\cite{shimizu2006lingam} assumes $V = f(U) + \varepsilon$ with $\varepsilon \perp U$. The regression residual in direction $u \to v$ at point $u_{\sigma(i)}$ is:
+\begin{equation}
+  r_h(u_{\sigma(i)}) = v_{\sigma(i)} - \hat{m}_h(u_{\sigma(i)}),
+  \label{eq:anm_resid}
+\end{equation}
+computed with the same three bandwidths, producing channels $\mathbf{c}_6, \mathbf{c}_7, \mathbf{c}_8$.
+
+The causal asymmetry of ANM residuals is what makes this channel informative: in a model $U \to V$ with non-Gaussian noise, the residual $V - \hat{m}(U)$ is closer to independent of $U$ than the reverse direction $U - \hat{m}(V)$~\cite{shimizu2006lingam}. The Conv1D model can learn this signature from the distributional shape of $\mathbf{c}_{6..8}$. Experiments show that ANM channels improve Collider accuracy by $+6.1\%$ and Consequence of X by $+5.0\%$ compared to the 3-channel baseline.
+
+% =====================================================================
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.85\linewidth]{figures/edge_tensor_illustration.png}
+    \caption{Illustration of edge tensor construction for variable pair $(u,v)$: the three original channels represent the marginal distribution of $u$, the rank relationship between $u$ and $v$, and the nonlinear kernel regression fit.}
+    \label{fig:edge_tensor_ch2}
+\end{figure}
+
+\section{Core Deep Learning Architectural Components}
+\label{sec:deep_arch}
+% =====================================================================
+
+\subsection{1D Convolutional Networks and Residual Blocks}
+
+1D convolutional networks apply learned filters over 1D sequences, making them well-suited to extract local features from edge tensors (each edge is a sequence of length $n = 1000$). With a filter of width $k$, a Conv1D layer computes:
+\begin{equation}
+  y_t = \sum_{j=0}^{k-1} w_j \cdot x_{t+j} + b,
+  \label{eq:conv1d}
+\end{equation}
+yielding a feature representation at each position in the input sequence.
+
+To avoid vanishing gradients as network depth increases, \textit{skip connections} (residual connections)~\cite{he2016resnet} are used:
+\begin{equation}
+  \mathbf{y} = \mathcal{F}(\mathbf{x};\, \{W_i\}) + \mathbf{x},
+  \label{eq:residual}
+\end{equation}
+where $\mathcal{F}$ is the learned mapping and $\mathbf{x}$ is the shortcut input. Combined with \textit{Group Normalization}~\cite{wu2018groupnorm} (replacing Batch Normalization for stability with small batch sizes) and the GELU activation function~\cite{hendrycks2016gelu}, each residual block in the model takes the form:
+\begin{equation}
+  \mathbf{y} = \mathbf{x} + \mathrm{Conv1D}\!\left(\mathrm{GELU}\!\left(\mathrm{GroupNorm}(\mathbf{x})\right)\right).
+  \label{eq:residual_block}
+\end{equation}
+
+\subsection{Self-Attention Mechanism}
+\label{subsec:selfattention}
+
+After each edge tensor is processed through Conv1D blocks and reduced to a representation vector $\mathbf{e}_{uv} \in \mathbb{R}^d$ via Global Average Pooling, information from all edges in the graph must be aggregated to reason about each variable's role. The \textit{self-attention} mechanism~\cite{vaswani2017attention} allows each element in a sequence to query information from all other elements:
+\begin{equation}
+  \mathrm{Attention}(Q, K, V) = \mathrm{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V,
+  \label{eq:attention}
+\end{equation}
+where $Q = \mathbf{X} W^Q$, $K = \mathbf{X} W^K$, $V = \mathbf{X} W^V$ are linear projections.
+
+\textit{Multi-head attention}~\cite{vaswani2017attention} runs $H$ attention heads in parallel:
+\begin{equation}
+  \mathrm{MultiHead}(Q,K,V) = \mathrm{Concat}(\mathrm{head}_1,\ldots,\mathrm{head}_H)\,W^O.
+  \label{eq:multihead}
+\end{equation}
+Two layers of multi-head self-attention are placed after the pooling step to aggregate edge-level representations across all edges in a dataset, enabling the model to compare graph-wide information and transition from edge-level to node-level representations.
+
+\subsection{Loss Function and Training Strategy}
+\label{subsec:training}
+
+The model uses two output heads with two loss functions. The \textbf{Node head} (8-class) is the primary loss: Cross-Entropy (CE) with inverse-frequency class weights. The \textbf{Edge head} (binary -- causal edge present or not) is an auxiliary loss used only during training. The combined loss is:
+\begin{equation}
+  \mathcal{L} = \mathcal{L}_{\mathrm{node}} + \lambda \cdot \mathcal{L}_{\mathrm{edge}},
+  \label{eq:loss}
+\end{equation}
+where $\lambda$ is a balancing hyperparameter. Class weights in CE are set inversely proportional to class frequency in the training set to handle class imbalance. Optimization uses \textit{AdamW}~\cite{loshchilov2019adamw} with a \textit{cosine annealing} schedule~\cite{loshchilov2017sgdr}.
+
+% =====================================================================
+\section{Existing Approaches on the ADIA Lab Challenge}
+\label{sec:related_work}
+% =====================================================================
+
+\subsection{First-Place Solution: End-to-End Deep Learning}
+\label{subsec:rank1}
+
+The first-place solution~\cite{adia_rank1_report} is an end-to-end deep learning model with the following architecture: \textit{Edge tensor construction} (3 channels) $\to$ \textit{Stem Conv1D} (3$\to$64 channels) $\to$ 5 \textit{Residual Conv1D blocks} $\to$ \textit{Global Average Pooling} $\to$ \textit{Merge with edge-type embedding} $\to$ 2 \textit{Self-Attention layers} $\to$ \textit{Node head} (8-class) + \textit{Edge head} (binary, auxiliary). The model has approximately 188K parameters and achieves \textbf{76.7\%} Balanced Accuracy on the public leaderboard.
+
+\subsection{Rank 3--5 Solutions: Feature Engineering with Gradient Boosting}
+
+The rank-4~\cite{adia_rank4_medium} and rank-5~\cite{adia_rank5_medium} solutions follow a feature engineering + gradient boosting approach: extracting statistical features (Pearson/Spearman correlation, partial correlation, conditional mutual information, HSIC, regression residuals) together with signals from classical causal discovery algorithms (LiNGAM~\cite{shimizu2006lingam}, GES), then using LightGBM/XGBoost ensembles for 8-class classification. Advantages include interpretability and no GPU requirement; disadvantages include dependence on manual feature engineering and the inability to learn representations end-to-end.
+
+\subsection{Position of This Thesis}
+
+This thesis reimplements and analyzes the first-place solution in detail, then proposes improvements to raise Balanced Accuracy -- particularly on the difficult classes Mediator ($\sim\!56\%$) and Collider ($\sim\!63\%$) in the reimplementation baseline. The baseline score achieved in this thesis is \textbf{73.96\%} local / \textbf{73.61\%} public leaderboard. The specific technical contributions are presented in Chapter~\ref{chap:method}.
