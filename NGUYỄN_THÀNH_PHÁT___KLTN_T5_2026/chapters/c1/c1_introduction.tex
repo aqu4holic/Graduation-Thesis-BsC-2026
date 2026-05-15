@@ -1,214 +1,90 @@
-% \chapter{Đặt vấn đề}
-
-% Chương này cần trình bày được:
-% \begin{itemize}
-%     \item Bối cảnh và lý do chọn đề tài: Bài toán KLTN giải quyết là gì, trong bối cảnh Khoa học/kỹ thuật/thực tiễn như thế nào? Vì sao đề tài này quan trọng và có ý nghĩa?
-
-%     \item Mô tả bài toán: Phát biểu rõ ràng bài toán mà KLTN giải quyết, gồm đầu vào, đầu ra, phạm vi và các giả định (nếu có)
-
-%     \item Mục tiêu và phạm vi nghiên cứu của KLTN
-%     \item Cấu trúc KLTN
-% \end{itemize}
-
-% \chapter{Đặt vấn đề}
-% \label{chap:intro}
-
-% % =====================================================================
-% \section{Giới thiệu bài toán}
-% % =====================================================================
-
-% Trong khoa học dữ liệu và thống kê, việc hiểu \textit{quan hệ nhân quả} giữa các biến số quan trọng hơn nhiều so với đơn thuần đo lường tương quan. Tương quan có thể xuất hiện do nhiều nguyên nhân khác nhau -- biến chung ẩn (confounder), quan hệ trung gian (mediator), hay chỉ đơn giản là sự trùng hợp thống kê -- trong khi quan hệ nhân quả phản ánh cơ chế vận hành thực sự của hệ thống~\cite{pearl2009causality}. Xác định đúng cấu trúc nhân quả là nền tảng cho nhiều bài toán thực tiễn: thiết kế thực nghiệm, đánh giá tác động chính sách, phân tích rủi ro trong tài chính, và suy luận nhân quả trong y học~\cite{hasan2023survey_arxiv}.
-
-% Bài toán trong khóa luận này được xây dựng dựa trên \textbf{ADIA Lab Causal Discovery Challenge}~\cite{crunchdao_causal_2024, crunchdao_adia_docs}, một cuộc thi khoa học dữ liệu do ADIA Lab phối hợp cùng CrunchDAO tổ chức. Cụ thể, bài toán yêu cầu: cho một tập dữ liệu gồm $n = 1000$ quan sát trên $p \in \{3,\ldots,10\}$ biến, trong đó luôn có cạnh nhân quả $X \to Y$ (với $X$ là biến can thiệp, $Y$ là biến kết quả), hãy \textbf{phân loại vai trò} của mỗi biến $K$ còn lại vào một trong \textbf{8 lớp}: Confounder, Mediator, Collider, Independent, Cause of X, Consequence of X, Cause of Y, Consequence of Y.
-
-% Đây là bài toán \textit{phân loại đa lớp có giám sát}: với 47,000 tập dữ liệu huấn luyện, mô hình cần học được các đặc trưng thống kê và cấu trúc đồ thị tiềm ẩn để phân biệt tám vai trò -- một số trong đó có biểu hiện thống kê rất gần nhau và khó phân biệt. Hiệu quả được đo bằng chỉ số \textit{Multiclass Balanced Accuracy}~\cite{crunchdao_adia_docs}.
-
-% % =====================================================================
-% \begin{figure}[h]
-%     \centering
-%     \includegraphics[width=0.75\linewidth]{figures/eight_roles_dag.png}
-%     \caption{Minh họa tám vai trò của biến $K$ đối với quan hệ $X \to Y$:
-%              mỗi vai trò tương ứng với một cấu trúc DAG cục bộ khác nhau.}
-%     \label{fig:eight_roles}
-% \end{figure}
-
-% \section{Động lực và thách thức}
-% % =====================================================================
-
-% Mặc dù nhiều thuật toán suy luận nhân quả cổ điển đã được đề xuất (PC, LiNGAM, NOTEARS, v.v.), các phương pháp này thường hướng đến học \textit{toàn bộ cấu trúc DAG} và gặp khó khăn khi cần phân loại chính xác \textit{vai trò từng biến} trong bối cảnh dữ liệu quan sát có kích thước hữu hạn~\cite{spirtes2000causation}.
-
-% Bài toán ADIA Lab đặt ra một số thách thức đặc thù:
-
-% \begin{itemize}
-%   \item \textbf{Phân biệt các cặp lớp tương tự:} Ví dụ, Confounder ($K \to X$, $K \to Y$)
-%         và Cause of X ($K \to X$, không có $K \to Y$) đều tạo ra tương quan giữa $K$ và $X$;
-%         hay Mediator ($X \to K \to Y$) và Consequence of X ($X \to K$, không ảnh hưởng $Y$)
-%         đều có $X \to K$ -- sự khác biệt nằm ở những tín hiệu rất nhỏ trong dữ liệu.
-
-%   \item \textbf{Mất cân bằng lớp:} Tám lớp không phân bố đều,
-%         đặc biệt lớp Mediator và Collider có số mẫu thấp hơn các lớp khác,
-%         dẫn đến xu hướng mô hình bỏ qua các lớp thiểu số nếu không có chiến lược xử lý phù hợp.
-
-%   \item \textbf{Bất biến hoán vị:} Số biến $p$ thay đổi từ 3 đến 10, và thứ tự đặt tên biến
-%         không mang ý nghĩa ngữ nghĩa -- mô hình cần bất biến với hoán vị biến.
-
-%   \item \textbf{Dữ liệu phi tuyến:} Quan hệ giữa các biến không nhất thiết tuyến tính;
-%         đặc trưng thống kê đơn giản như tương quan Pearson thường không đủ để phân biệt các vai trò.
-% \end{itemize}
-
-% Các giải pháp cổ điển được ban tổ chức cung cấp sẵn (PC algorithm, Random Forest, deep learning baseline) chỉ đạt khoảng \textbf{40\%} Balanced Accuracy~\cite{olivetti2025adialab} -- chưa xa so với ngưỡng random guessing 12.5\% (1/8).
-% Giải pháp hạng nhất trong cuộc thi~\cite{adia_rank1_report} đã giải quyết các thách thức này
-% bằng một kiến trúc học sâu end-to-end: biểu diễn mỗi cặp biến như một \textit{edge tensor} 3 kênh
-% (bao gồm đặc trưng hồi quy kernel phi tuyến), sau đó dùng Conv1D residual
-% và self-attention để học biểu diễn toàn đồ thị và phân loại vai trò từng biến,
-% đạt \textbf{76.70\%} Balanced Accuracy~\cite{olivetti2025adialab}.
-% Luận văn này tái hiện lại giải pháp đó, phân tích các thành phần, và đề xuất
-% mở rộng lên 8 kênh đặc trưng kết hợp với tăng cường dữ liệu X/Y remap,
-% từ đó đạt \textbf{80.22\%} trên public leaderboard -- vượt qua giải pháp hạng nhất.
-
-% % =====================================================================
-% \section{Mục tiêu và phạm vi khóa luận}
-% % =====================================================================
-
-% Khóa luận này có hai mục tiêu chính:
-
-% \begin{enumerate}
-%   \item \textbf{Tái hiện và phân tích} giải pháp hạng nhất của ADIA Lab Causal Discovery Challenge:
-%         hiểu rõ từng thành phần kiến trúc, quy trình huấn luyện, và lý do hiệu quả của từng lựa chọn thiết kế.
-%         Mục tiêu này tạo ra một baseline vững chắc với điểm số có thể tái lập được.
-
-%   \item \textbf{Đề xuất cải tiến} nhằm nâng cao Balanced Accuracy,
-%         đặc biệt trên các lớp khó (Mediator, Collider),
-%         thông qua các hướng: bổ sung kênh đặc trưng, cải tiến kiến trúc,
-%         và chiến lược huấn luyện.
-% \end{enumerate}
-
-% \textbf{Phạm vi:} Khóa luận tập trung vào dữ liệu quan sát i.i.d.\ theo thiết lập của ADIA Lab
-% (không phải chuỗi thời gian có autocorrelation).
-% Mô hình được triển khai và đánh giá trên nền tảng CrunchDAO
-% bằng chỉ số Multiclass Balanced Accuracy chính thức.
-
-% % =====================================================================
-% \section{Đóng góp của khóa luận}
-% % =====================================================================
-
-% Các đóng góp cụ thể của khóa luận bao gồm:
-
-% \begin{itemize}
-%   \item \textbf{Tái hiện và phân tích chi tiết giải pháp hạng nhất:}
-%         Cài đặt lại toàn bộ pipeline -- từ xây dựng edge tensor (3 kênh, hồi quy kernel)
-%         đến kiến trúc Conv1D residual + self-attention + dual-head loss --
-%         và đạt được điểm số \textbf{73.96\%} (local) / \textbf{73.6\%} (public leaderboard),
-%         xác nhận tính tái lập của giải pháp.
-
-%   \item \textbf{Mở rộng edge tensor lên 8 kênh:}
-%         Đề xuất bổ sung 3 kênh hồi quy kernel đa băng thông ($h \in \{0.2, 0.5, 1.0\}$)
-%         và 3 kênh phần dư ANM (Additive Noise Model) đa băng thông,
-%         từ đó tăng khả năng mô hình nhận biết tính bất đối xứng nhân quả
-%         và phân biệt các lớp khó như Collider và Consequence of X.
-
-%   \item \textbf{Chiến lược tăng cường dữ liệu X/Y remap:}
-%         Đề xuất và cài đặt kỹ thuật tăng cường dữ liệu bằng cách
-%         coi mỗi cạnh có hướng $A \to B$ trong DAG thật như một cặp $(X', Y')$ mới,
-%         tái tính toán nhãn 8 lớp cho tất cả biến còn lại theo cặp mới,
-%         thu được $\sim\!11.2\times$ mẫu huấn luyện bổ sung.
-
-%   \item \textbf{Kết quả vượt trội so với giải pháp hạng nhất:}
-%         Mô hình đề xuất (v8b + XY augmentation) đạt \textbf{80.26\%} (local) /
-%         \textbf{80.22\%} (public leaderboard), vượt giải pháp hạng nhất
-%         của cuộc thi (\textbf{76.70\%}) với biên độ $+3.52\%$~\cite{olivetti2025adialab}.
-% \end{itemize}
-
-% % =====================================================================
-% \section{Cấu trúc khóa luận}
-% % =====================================================================
-
-% Phần còn lại của khóa luận được tổ chức như sau:
-
-% \begin{itemize}
-%   \item \textbf{Chương~\ref{chap:background} -- Cơ sở lý thuyết:}
-%         Trình bày lý thuyết đồ thị nhân quả, định nghĩa tám vai trò,
-%         đặc trưng edge tensor và các khối kiến trúc học sâu được sử dụng.
-
-%   \item \textbf{Chương~3 -- Phương pháp:}
-%         Mô tả chi tiết kiến trúc mô hình, quy trình xây dựng đặc trưng,
-%         hàm mất mát và chiến lược huấn luyện; đồng thời trình bày
-%         các cải tiến được đề xuất.
-
-%   \item \textbf{Chương~4 -- Thực nghiệm:}
-%         Trình bày thiết lập thực nghiệm, quy trình đánh giá,
-%         và kết quả so sánh giữa baseline và các cải tiến.
-
-%   \item \textbf{Chương~5 -- Kết luận:}
-%         Tổng kết kết quả đạt được, thảo luận hạn chế và định hướng nghiên cứu tiếp theo.
-% \end{itemize}
-
 \chapter{Introduction}
 \label{chap:intro}
 
 % =====================================================================
-\section{Problem Statement}
+\section{Context and Problem Statement}
+\label{sec:context}
 % =====================================================================
 
-In data science and statistics, understanding \textit{causal relationships} between variables is far more important than merely measuring correlation. Correlation can arise from many sources -- hidden common causes (confounders), mediation, or pure statistical coincidence -- whereas causal relationships reflect the true underlying mechanism of a system~\cite{pearl2009causality}. Correctly identifying causal structure is foundational to many practical problems: experimental design, policy impact evaluation, financial risk analysis, and causal inference in medicine~\cite{hasan2023survey_arxiv}.
+Understanding why things happen matters more than merely knowing that things happen together. When a doctor prescribes a treatment, an economist evaluates a policy, or an engineer diagnoses a system failure, the goal is not to find correlations but to understand causal mechanisms~\cite{pearl2009causality}. Knowing that treatment and recovery are correlated is insufficient for making good medical decisions; what matters is whether the treatment causes recovery or whether both are confounded by some third factor such as patient age or disease severity.
 
-The problem studied in this thesis is grounded in the \textbf{ADIA Lab Causal Discovery Challenge}~\cite{crunchdao_causal_2024, crunchdao_adia_docs}, a data science competition organized by ADIA Lab in collaboration with CrunchDAO. Specifically, the task is: given a dataset of $n = 1000$ observations over $p \in \{3,\ldots,10\}$ variables, where a causal edge $X \to Y$ always exists (with $X$ the treatment variable and $Y$ the outcome), \textbf{classify the role} of each remaining variable $K$ into one of \textbf{8 classes}: Confounder, Mediator, Collider, Independent, Cause of X, Consequence of X, Cause of Y, or Consequence of Y.
+This thesis addresses the \textbf{ADIA Lab Causal Discovery Challenge}, a competitive machine learning benchmark organized by ADIA Lab in collaboration with CrunchDAO~\cite{crunchdao_causal_2024, crunchdao_adia_docs}. The task requires classifying the causal role of each variable in a dataset with a designated treatment $X$ and outcome $Y$. Given $n=1000$ observational samples over $p\in\{3,\ldots,10\}$ variables, the model must assign each remaining variable $K$ to one of eight causal roles: Confounder, Mediator, Collider, Independent, Cause of X, Consequence of X, Cause of Y, or Consequence of Y.
 
-This is a \textit{supervised multiclass classification} problem: given 47,000 training datasets, the model must learn statistical features and latent graph structure to distinguish among eight roles -- several of which share very similar statistical signatures and are inherently difficult to separate. Performance is measured by \textit{Multiclass Balanced Accuracy}~\cite{crunchdao_adia_docs}.
-
-% =====================================================================
-\begin{figure}[h]
-    \centering
-    \includegraphics[width=0.75\linewidth]{figures/eight_roles_dag.png}
-    \caption{Illustration of the eight causal roles of variable $K$ with respect to the relationship $X \to Y$: each role corresponds to a distinct local DAG structure.}
-    \label{fig:eight_roles}
-\end{figure}
-
-\section{Motivation and Challenges}
-% =====================================================================
-
-Although many classical causal inference algorithms have been proposed (PC, LiNGAM, NOTEARS, etc.), these methods typically aim to recover the \textit{full DAG structure} and struggle when the goal is to precisely classify \textit{the role of each individual variable} from finite-sample observational data~\cite{spirtes2000causation}.
-
-The ADIA Lab problem poses several specific challenges. First, \textbf{distinguishing between similar class pairs}: for example, Confounder ($K \to X$, $K \to Y$) and Cause of X ($K \to X$, no $K \to Y$) both induce correlation between $K$ and $X$; similarly, Mediator ($X \to K \to Y$) and Consequence of X ($X \to K$, no effect on $Y$) both exhibit $X \to K$ -- the distinction lies in very subtle signals within the data. Second, \textbf{class imbalance}: the eight classes are not uniformly distributed, with Mediator and Collider having significantly fewer samples than others, causing models to neglect minority classes without appropriate handling strategies. Third, \textbf{permutation invariance}: the number of variables $p$ varies from 3 to 10, and variable naming order carries no semantic meaning -- the model must be invariant to variable permutation. Fourth, \textbf{nonlinear relationships}: the dependencies between variables are not necessarily linear, and simple statistics such as Pearson correlation are often insufficient to distinguish roles.
-
-Classical solutions provided by the competition organizers (PC algorithm, Random Forest, deep learning baseline) achieved only around \textbf{40\%} Balanced Accuracy~\cite{olivetti2025adialab} -- not far above random guessing at 12.5\% (1/8). The competition's first-place solution~\cite{adia_rank1_report} addressed these challenges through an end-to-end deep learning architecture: representing each variable pair as a \textit{3-channel edge tensor} (incorporating nonlinear kernel regression features), then using residual Conv1D and self-attention to learn graph-wide representations and classify each variable's role, achieving \textbf{76.70\%} Balanced Accuracy~\cite{olivetti2025adialab}. This thesis reimplements that solution, analyzes its components, and proposes extensions to an 8-channel feature representation combined with X/Y remap data augmentation, ultimately achieving \textbf{80.82\%} on the public leaderboard -- surpassing the first-place solution.
+This eight-class classification problem presents four specific challenges that classical causal discovery methods struggle to overcome. First, subtle class distinctions make role pairs difficult to separate: Confounder ($K\to X, K\to Y$) and Cause of X ($K\to X$ only) both induce correlation between $K$ and $X$; similarly, Mediator ($X\to K\to Y$) and Consequence of X ($X\to K$ only) both exhibit dependence between $X$ and $K$. The distinguishing signal lies in subtle asymmetries that scalar statistics cannot capture. Second, class imbalance causes models to neglect minority roles such as Mediator and Collider without careful handling strategies. Third, permutation invariance requires the model to treat $(X,Y,K_1,K_2)$ identically to $(K_2,X,K_1,Y)$ since variable naming order carries no semantic information. Fourth, nonlinear relationships mean that simple Pearson correlation is often insufficient when causal roles differ in the shape rather than strength of their conditional relationships.
 
 % =====================================================================
-\section{Objectives and Scope}
+\section{Existing Solutions and Their Limitations}
+\label{sec:limitations}
 % =====================================================================
 
-This thesis has two primary objectives. First, to \textbf{reimplement and analyze} the first-place solution of the ADIA Lab Causal Discovery Challenge: understanding each architectural component, the training procedure, and the rationale behind each design choice. This objective produces a solid, reproducible baseline. Second, to \textbf{propose improvements} aimed at increasing Balanced Accuracy, particularly on difficult classes (Mediator, Collider), through additional feature channels, architectural refinements, and training strategies.
+Prior work on this challenge falls into three groups, each with fundamental limitations that constrain performance.
 
-\textbf{Scope:} The thesis focuses on i.i.d.\ observational data following the ADIA Lab setup (not time-series with autocorrelation). The model is implemented and evaluated on the CrunchDAO platform using the official Multiclass Balanced Accuracy metric.
+\textbf{Classical Causal Discovery Methods} rely on conditional independence tests such as the PC algorithm to identify causal structure from observational data~\cite{hasan2023survey_arxiv}. These methods achieve only \textbf{~40\% Balanced Accuracy} on the ADIA Lab challenge~\cite{olivetti2025adialab}, barely above the 12.5\% random baseline for eight-class classification. Their limitations are severe: \textbf{limited to linear relationships and simple dependencies}, and \textbf{cannot handle the eight-class fine-grained classification task} since their output is a causal graph, not a role assignment for each variable.
 
-% =====================================================================
-\section{Contributions}
-% =====================================================================
+\textbf{Machine Learning Feature Engineering Approaches} extract scalar statistics from each variable pair and train gradient boosted classifiers. A LightGBM model on 11 hand-crafted features achieves 63.11\%. A comprehensive pipeline with 300+ features including Pearson, Spearman, and distance correlation coefficients, partial correlations, conditional mutual information, HSIC, ANM scores, and outputs from PC, LiNGAM, NOTEARS, and GES algorithms reaches 72.64\% with XGBoost and LightGBM ensembles. Despite this extensive feature engineering, performance remains 8.44\% below the final model. The core problem is that \textbf{scalar features irreversibly discard curve shape information}: conditional expectation curves encode the functional form of causal relationships, and reducing them to single numbers loses the distinguishing patterns between roles.
 
-The specific contributions of this thesis are as follows.
+\textbf{Deep Learning Approaches} began with the competition's first-place solution, which introduced 3-channel edge tensors encoding conditional distributions as structured inputs for a neural classifier~\cite{adia_rank1_report}. This approach achieves 76.70\% Balanced Accuracy, establishing a strong baseline that outperforms all classical and ML feature engineering methods. However, it has three critical limitations: \textbf{only 3 channels miss multi-scale patterns} that multi-bandwidth kernel regression can capture; \textbf{no structural awareness in the attention mechanism} means the model cannot encode topology-aware priors for chain, fork, and collider relationships; and \textbf{no 2D visual representation of joint distributions} leaves patterns invisible to pairwise analysis.
 
-\textbf{Reimplementation and detailed analysis of the first-place solution:} The complete pipeline is reimplemented -- from edge tensor construction (3 channels, kernel regression) to the residual Conv1D + self-attention + dual-head loss architecture -- achieving \textbf{73.96\%} (local) / \textbf{73.61\%} (public leaderboard), confirming the reproducibility of the original solution.
-
-\textbf{Extension of edge tensors to 8 channels:} Three multi-bandwidth kernel regression channels ($h \in \{0.2, 0.5, 1.0\}$) and three multi-bandwidth ANM (Additive Noise Model) residual channels are added, enhancing the model's ability to detect causal asymmetry and distinguish difficult classes such as Collider and Consequence of X.
-
-\textbf{X/Y remap data augmentation strategy:} A data augmentation technique is proposed and implemented by treating each directed edge $A \to B$ in the ground-truth DAG as a new treatment-outcome pair $(X', Y')$, recomputing 8-class labels for all remaining variables relative to the new pair, yielding approximately $11.2\times$ additional training samples.
-
-\textbf{Structural attention bias:} A topology-aware attention bias is introduced into the self-attention layers, encoding prior knowledge about causal relationships between edge pairs (chain, fork, collider) directly into the architecture with minimal additional parameters.
-
-\textbf{Results surpassing the first-place solution:} The best proposed model (v11 + XY augmentation) achieves \textbf{81.14\%} (local) / \textbf{80.82\%} (public leaderboard), surpassing the competition's first-place solution (\textbf{76.70\%}) by a margin of $+4.12\%$~\cite{olivetti2025adialab}.
+These limitations collectively define the performance ceiling of existing approaches. Addressing all eight requires a fundamentally different architecture that preserves curve shape information, captures multi-scale causal asymmetry, encodes structural inductive bias, and combines complementary visual and statistical representations.
 
 % =====================================================================
-\section{Thesis Structure}
+\section{Our Solution and Results}
+\label{sec:solution}
 % =====================================================================
 
-The remainder of the thesis is organized as follows.
+This thesis proposes a dual-pipeline neural architecture that addresses all eight limitations through five targeted contributions. The first pipeline processes 1D edge tensors encoding conditional distributions; the second processes 2D scatter density images encoding joint distribution topology. These pipelines are fused through learned gating and trained with a weighted dual-loss objective.
 
-\textbf{Chapter~\ref{chap:background} -- Background:} Presents causal graph theory, definitions of the eight roles, edge tensor features, and the core deep learning architectural components used.
+The final model achieves \textbf{81.082\% Balanced Accuracy} on the private test set, surpassing the first-place solution by +4.38 percentage points and outperforming the faithful baseline reimplementation by +7.12 percentage points.
 
-\textbf{Chapter~3 -- Methodology:} Describes in detail the model architecture, feature construction pipeline, loss function, and training strategy, along with the proposed improvements.
+% =====================================================================
+\section{Five Technical Contributions}
+\label{sec:contributions}
+% =====================================================================
 
-\textbf{Chapter~4 -- Experiments:} Presents the experimental setup, evaluation procedure, and comparative results between the baseline and proposed improvements.
+The first contribution is an \textbf{8-Channel Edge Tensor} that extends the baseline 3-channel representation by adding multi-bandwidth kernel regression channels ($h\in\{0.2,0.5,1.0\}$) capturing causal asymmetry at different scales, and ANM residual channels providing directional asymmetry signals. This representation captures patterns that a single bandwidth cannot, yielding +1.89\% improvement over the 3-channel baseline.
 
-\textbf{Chapter~5 -- Results and Analysis:} Provides detailed analysis of all experimental results, ablation studies, error analysis, and key lessons learned.
+The second contribution is a \textbf{Structural Attention Bias} that injects topology-aware priors into self-attention layers. Rather than adding thousands of unconstrained parameters (which produced negative gains of -1.19\% to -1.90\% in failed experiments), this approach encodes six causal relationship types using only six learned scalars, outperforming those larger models by over 3.5 percentage points and providing the largest single architectural gain of +2.65\%.
 
-\textbf{Chapter~6 -- Conclusion:} Summarizes the results achieved, discusses limitations, and outlines directions for future work.
+The third contribution is a \textbf{2D Scatter Density Pipeline} that renders joint distributions as 8-channel $32\times32$ density images processed by a convolutional encoder. This complements the 1D edge tensor pipeline by capturing patterns such as multimodality and conditional heteroskedasticity that are invisible to pairwise scalar statistics, contributing +0.88\% with particularly strong gains on Confounder (+2.78\%) and Consequence of Y (+2.18\%).
+
+The fourth contribution is \textbf{X/Y Remap Data Augmentation} that treats each directed edge $A\to B$ in the ground-truth DAG as a new treatment-outcome pair $(X',Y')$, recomputing all eight role labels accordingly. This multiplies effective training data by approximately 11x without additional data collection, yielding +1.55\% to +3.32\% depending on base model configuration.
+
+The fifth contribution is a \textbf{Dual-Head Loss Weighting} scheme with $\lambda=0.7$ balancing the edge and node loss heads. This ensures both pipelines remain causally meaningful throughout training rather than one dominating, contributing an additional +0.59\% improvement.
+
+\begin{table}[ht]
+	\centering
+	\caption{Performance comparison on the ADIA Lab Causal Discovery Challenge.
+		Classical methods suffer from linear assumptions and coarse-grained output.
+		ML feature engineering irreversibly loses curve shape when compressing to scalars.
+		The 3-channel deep learning baseline misses multi-scale patterns, lacks structural awareness, and has no visual representation.
+		The proposed method addresses all eight limitations simultaneously, achieving state-of-the-art performance.}
+	\label{tab:sota_comparison}
+	\begin{tabular}{lcc}
+		\toprule
+		\textbf{Approach}                                           & \textbf{Balanced Accuracy} & \textbf{Gap to SOTA} \\
+		\midrule
+		Classical baselines (PC, RF, DL)~\cite{olivetti2025adialab} & $\sim$40\%                 & $-$41\%              \\
+		ML fullstack ensemble (300+ features)                       & 72.64\%                    & $-$8.44\%            \\
+		Competition 1st place (3-channel)~\cite{adia_rank1_report}  & 76.70\%                    & $-$4.38\%            \\
+		Proposed (8-channel + 2D + XY aug)                          & \textbf{81.082\%}          & \textbf{Baseline}    \\
+		\bottomrule
+	\end{tabular}
+\end{table}
+
+% =====================================================================
+\section{Validation Evidence}
+\label{sec:validation}
+% =====================================================================
+
+Ablation studies confirm that each contribution is necessary rather than redundant. Removing the edge context encoder collapses performance from 80.47\% to 51.51\%, a 29-percentage-point drop demonstrating that the 1D pipeline provides structurally necessary information that the 2D pipeline alone cannot capture. The four directional embeddings ($K\to X, K\to Y, X\to K, Y\to K$) propagate graph-wide causal context to each variable's representation.
+
+The structural attention bias experiments provide a particularly instructive comparison. Adding 256 unconstrained attention parameters produced -1.19\% while adding 1024 parameters produced -1.90\%. By contrast, the six structured scalars encoding topology priors produced +2.65\%. This demonstrates that for this problem, structured inductive bias consistently outperforms raw model capacity when training data represents causal structure rather than arbitrary functions.
+
+Per-class ablation analysis reveals complementary benefits across contributions. The 2D pipeline benefits Confounder (+2.78\%) and Mediator (+2.28\%) most, roles where joint distribution shape provides distinguishing information. The XY augmentation benefits rare classes most, validating that data multiplication addresses class imbalance rather than just overall volume.
+
+% =====================================================================
+\section{Thesis Organization}
+\label{sec:organization}
+% =====================================================================
+
+The remainder of this thesis is organized as follows. Chapter~\ref{chap:background} reviews causal graph foundations, formally defines the eight causal roles, explains edge tensor construction and ANM residuals, and describes the deep learning components employed in this work. Chapter~\ref{chap:method} presents the complete dual-pipeline architecture including the 8-channel edge tensor, structural attention bias, 2D scatter density classifier, fusion mechanism, and training procedures. Chapter~\ref{chap:eval} describes the ADIA Lab dataset, evaluation metrics, baseline implementations, and experimental protocols. Chapter~\ref{chap:results} reports ablation studies, per-class performance analysis, mechanistic insights, and general lessons extracted from both successful and failed experiments.

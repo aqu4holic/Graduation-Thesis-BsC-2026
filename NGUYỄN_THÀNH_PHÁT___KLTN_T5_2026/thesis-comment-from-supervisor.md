@@ -1,0 +1,33 @@
+- the thesis-references/ folder, read the .md from that for guideline and other pdfs for examples of formatting and style, writing etc.
+- no orphan lines
+- no widows
+- should write as paragraphs, avoid bullet points, dont overuse (all chapters should fix)
+- avoid repeating the same content in multiple chapters (e.g. problem statement, contributions, etc.) - if necessary, reference the original chapter instead of copying text
+- alignment of tables and figures (centered, consistent caption formatting)
+- title heading should be creative for chapter 3, thats our solution, not just "Methodology" or "Approach", dont use something general
+- introduction should be more engaging, we hvae to persuade the reviewer that the problem is important, other limitations have flaws, and our solution is novel and effective, so we have to make sure the introduction is compelling and well-structured. other methods should state there limitations
+- when we compare with other methods, like ml and depe learning approach of past winning solution. we should show our method is better
+- background and related work, we should first state the definition, and what we used in our method, i dont think we need d sep or something like that
+- chap2 has a stray subsection at the beginning, give me a plan where to put that
+
+# other notes
+- Cấm dùng cái [] trong figure (ảnh)
+- Tất cả các hình phải có mô tả (tức là phải có đoạn viết ở dưới để mô tả về hình), chứ mỗi title là ko đủ
+- Hình đưa vào thì phải cần thiết, ko đưa thừa thãi, đã đưa thì phải có mô tả.
+- Ko dc để hình bị vỡ, khó nhìn
+- ko dc để widow line, nếu để thầy thấy thầy sẽ trừ 1, 2 điểm, nghiêm túc.
+- Chú ý việc để tên chapter
+- Phần mô tả hình thì phải nói theo kiểu diễn dịch, ý là nói về cái đó rồi mới mô tả, chi tiết về nó.
+- ko đóng mở ngoặc ở title
+- ở trong các phần, cấm đoạn chỉ có 1, 2 câu (trừ các phần intro mở đầu các mục lớn), nhưng tới phần nội dung dài liên tục thì ko dc có.
+- ko nên để 1 câu dài quá 3, 4 dòng
+- chú ý dấu ngoặc kép trong overleaf, phải dùng ``
+- Introduction:
+    - bối cảnh, gth bài toán
+    - mô tả về giải pháp hiện có (nhóm lại) và các limitation của nó. Các giải limitation nên in đậm hoặc có gì đó để người đọc lướt qua là thấy dc nó và đọc nó luôn. Phải viết như nào để có thể thuyết phục người đọc rằng giải pháp của mình đáng làm và giải quyết được các limitation của giải pháp trc đó.
+    - tiếp theo nói về giải pháp của mình
+    - đoạn tiếp là nói sơ qua về kết quả của giải pháp
+    - Đoạn lớn tiếp theo mới tới contribution rồi ….
+- Chapter 2: Background & related work
+    - phần related work hình như chỉ nêu các đối thủ trực tiếp (chứ ko nêu các đối thủ liên quan ở phần này, nêu ở phần Introduction trc rồi) (maybe là thế)
+    - phần background và related work phải cite nhiều vào

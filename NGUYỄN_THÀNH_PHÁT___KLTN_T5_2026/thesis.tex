@@ -1,8 +1,8 @@
 \documentclass[a4paper,13pt]{report}
-% \usepackage[utf8]{vietnam}
 \usepackage[utf8]{vietnam}
 \usepackage[utf8]{inputenc}
-% \usepackage[vietnam]{babel}
+% \usepackage[vietnamese, english]{babel}
+\usepackage[vietnamese, main=english]{babel}
 \usepackage{amsmath}
 \usepackage{amsfonts}
 \usepackage{amssymb}
@@ -11,12 +11,17 @@
 % \usepackage{caption}
 \usepackage[font=small]{caption}
 \usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{siunitx}
 \usepackage[unicode]{hyperref}
 \usepackage[left=3cm,right=2cm,top=2.5cm,bottom=3cm]{geometry}
-\usepackage{titlesec} 
+\usepackage{titlesec}
 \usepackage{scrextend}
 \usepackage{enumerate}
 \usepackage{url}
+\urlstyle{same}
+\def\UrlBreaks{\do\.\do\@\do\\\do\/\do\!\do\_\do\#\do\-\do\:\do\~\do\%\do\(\do\)}
+\g@addto@macro{\UrlBreaks}{\do\=\do\<\do\>}
 \usepackage{tikz}
 \usepackage{float}
 \usepackage{afterpage}
@@ -26,7 +31,7 @@
 \usepackage{listings}
 \usepackage{makecell}
 \usepackage[sort&compress]{natbib}
-\usetikzlibrary{calc}
+\usetikzlibrary{arrows.meta, positioning, calc}
 \usepackage{algorithm}
 \usepackage{subcaption}
 % \usepackage{minted}
@@ -40,7 +45,7 @@
 \PassOptionsToPackage{table}{xcolor}
 
 \def\changemargin#1#2{\list{}{\rightmargin#2\leftmargin#1}\item[]}
-\let\endchangemargin=\endlist 
+\let\endchangemargin=\endlist
 
 \changefontsizes{13pt}
 \bibliographystyle{unsrt}
@@ -54,7 +59,7 @@
 \sectionfont{\fontsize{15}{15}\selectfont}
 \subsectionfont{\fontsize{13}{15}\selectfont}
 
-\titleformat{\chapter}[display]   
+\titleformat{\chapter}[display]
 {\normalfont\huge\bfseries}{\chaptertitlename\ \thechapter}{0pt}{\LARGE}
 \titlespacing*{\chapter}{0cm}{-\topskip}{0pt}[0pt]
 
@@ -104,7 +109,7 @@
   breaklines=true,                % sets automatic line breaking
   breakatwhitespace=false,        % sets if automatic breaks should only happen at whitespace
   title=\lstname,                   % show the filename of files included with \lstinputlisting;
-                                  % also try caption instead of title  
+                                  % also try caption instead of title
   commentstyle=\color{gray}\upshape
 }
 
@@ -139,7 +144,7 @@
 % Abstract English
 \input{chapters/abtract_en}\newpage\cleardoublepage
 % \renewcommand{\contentsname}{Table of Contents}
-\addcontentsline{toc}{chapter}{Table of Contents}
+% \addcontentsline{toc}{chapter}{Table of Contents}
 \tableofcontents\newpage\cleardoublepage
 %
 
@@ -164,9 +169,10 @@
 \input{chapters/c3/c3_chapter}\newpage\cleardoublepage
 \input{chapters/c4/c4_chapter}\newpage\cleardoublepage
 \input{chapters/c5/c5_chapter}\newpage\cleardoublepage
+\input{chapters/conclusion}\newpage\cleardoublepage
 
-%\nocite{*}
-\phantomsection 
+% \nocite{*}
+\phantomsection
 % \addcontentsline{toc}{chapter}{Tài liệu tham khảo}
 \addcontentsline{toc}{chapter}{References}
 \bibliography{references}\newpage\cleardoublepage

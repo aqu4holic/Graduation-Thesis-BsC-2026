@@ -23,3 +23,17 @@ wheels/
 
 # additional files
 .env
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.lof
+*.lot
+*.out
+*.synctex.gz
+*.toc
+thesis-references
+*tex*
+*.pt
+*.pkl

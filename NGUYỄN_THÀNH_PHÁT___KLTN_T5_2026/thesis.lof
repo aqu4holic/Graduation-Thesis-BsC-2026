@@ -1,6 +1,8 @@
+\babel@toc {english}{}\relax 
 \addvspace {10\p@ }
-\contentsline {figure}{\numberline {1.1}{\ignorespaces Caption of this graph.\relax }}{5}{figure.caption.5}
 \addvspace {10\p@ }
 \addvspace {10\p@ }
+\contentsline {figure}{\numberline {3.1}{\ignorespaces The v26e architecture: dual-pipeline neural network combining 1D edge context encoding with 2D scatter density visual features. The Edge Context Encoder (left, blue) processes all $p(p-1)$ directed edges through Conv1D and structural self-attention. The Node Visual Classifier (right, green) extracts features from 8-channel $32\times 32$ density images. The Fusion layer (center, orange) combines four edge embeddings ($K{\to }X, K{\to }Y, X{\to }K, Y{\to }K$) with the 2D visual embedding for final 8-class classification.}}{19}{figure.caption.4}%
+\contentsline {figure}{\numberline {3.2}{\ignorespaces The 8-channel edge tensor $\mathbf {T}_{uv} \in \mathbb {R}^{8 \times n}$ for a variable pair $(u,v)$. \textbf {Row 1} (blue): Sorted observations -- Channel 1 preserves the marginal distribution of $u$, Channel 2 shows $v$ sorted by rank of $u$ revealing functional relationship. \textbf {Row 2} (green): Nadaraya-Watson kernel regression at three bandwidths capturing different smoothness scales ($h=0.2$ local, $h=1.0$ global). \textbf {Row 3} (purple): ANM residuals -- approximately flat when $u \to v$ is the true direction (independent noise), structured in reverse direction.}}{21}{figure.caption.5}%
 \addvspace {10\p@ }
 \addvspace {10\p@ }
